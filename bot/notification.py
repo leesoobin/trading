@@ -1,0 +1,150 @@
+import asyncio
+import logging
+from datetime import datetime
+from typing import Optional, Callable
+
+logger = logging.getLogger(__name__)
+
+try:
+    from telegram import Update, Bot
+    from telegram.ext import Application, CommandHandler, ContextTypes
+    _HAS_TELEGRAM = True
+except ImportError:
+    _HAS_TELEGRAM = False
+    logger.warning("python-telegram-bot not installed. Telegram notifications disabled.")
+
+
+class TelegramNotifier:
+    def __init__(self, bot_token: str, chat_id: str,
+                 on_stop: Optional[Callable] = None,
+                 on_resume: Optional[Callable] = None):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self._on_stop = on_stop
+        self._on_resume = on_resume
+        self._app = None
+
+    def _format_krw(self, amount: float) -> str:
+        if abs(amount) >= 1_000_000:
+            return f"₩{amount/1_000_000:.2f}M"
+        elif abs(amount) >= 1_000:
+            return f"₩{amount/1_000:.1f}k"
+        return f"₩{amount:.0f}"
+
+    async def send_message(self, text: str):
+        if not _HAS_TELEGRAM:
+            logger.info(f"[Telegram 비활성화] {text}")
+            return
+        try:
+            bot = Bot(token=self.bot_token)
+            async with bot:
+                await bot.send_message(chat_id=self.chat_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"텔레그램 전송 실패: {e}")
+
+    def send(self, text: str):
+        """동기 래퍼"""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.send_message(text))
+            else:
+                loop.run_until_complete(self.send_message(text))
+        except Exception as e:
+            logger.error(f"텔레그램 send 오류: {e}")
+
+    def notify_buy(self, exchange: str, symbol: str, strategy: str,
+                   price: float, stop_price: float, take_profit: float,
+                   position_ratio: float):
+        stop_pct = (stop_price - price) / price * 100
+        tp_pct = (take_profit - price) / price * 100
+        msg = (
+            f"📈 <b>[매수 신호] {symbol}</b>\n"
+            f"거래소: {exchange}\n"
+            f"전략: {strategy}\n"
+            f"현재가: {self._format_krw(price)}\n"
+            f"목표가: {self._format_krw(take_profit)} ({tp_pct:+.1f}%)\n"
+            f"손절가: {self._format_krw(stop_price)} ({stop_pct:+.1f}%)\n"
+            f"포지션: 잔고의 {position_ratio:.1%}"
+        )
+        self.send(msg)
+
+    def notify_sell(self, exchange: str, symbol: str, strategy: str,
+                    price: float, pnl: float, reason: str):
+        pnl_emoji = "✅" if pnl >= 0 else "❌"
+        msg = (
+            f"{pnl_emoji} <b>[매도] {symbol}</b>\n"
+            f"거래소: {exchange}\n"
+            f"전략: {strategy}\n"
+            f"매도가: {self._format_krw(price)}\n"
+            f"손익: {self._format_krw(pnl)}\n"
+            f"사유: {reason}"
+        )
+        self.send(msg)
+
+    def notify_daily_report(self, date_str: str, summary: dict):
+        upbit_pnl = summary.get("upbit_pnl", 0)
+        kis_dom_pnl = summary.get("kis_domestic_pnl", 0)
+        kis_ovs_pnl = summary.get("kis_overseas_pnl", 0)
+        total_pnl = upbit_pnl + kis_dom_pnl + kis_ovs_pnl
+        wins = summary.get("win_count", 0)
+        total = summary.get("trade_count", 0)
+        win_rate = f"{wins}/{total} ({wins/total*100:.0f}%)" if total > 0 else "0/0"
+        msg = (
+            f"📊 <b>[일일 리포트] {date_str}</b>\n"
+            f"업비트: {upbit_pnl:+.1%} | 손익: {self._format_krw(upbit_pnl)}\n"
+            f"KIS 국내: {kis_dom_pnl:+.1%} | 손익: {self._format_krw(kis_dom_pnl)}\n"
+            f"KIS 해외: {kis_ovs_pnl:+.1%} | 손익: {self._format_krw(kis_ovs_pnl)}\n"
+            f"총 손익: {self._format_krw(total_pnl)} | 승률: {win_rate}"
+        )
+        self.send(msg)
+
+    def notify_error(self, module: str, error: str):
+        msg = f"⚠️ <b>[오류] {module}</b>\n{error}"
+        self.send(msg)
+
+    def notify_circuit_breaker(self, daily_loss: float, capital: float):
+        ratio = abs(daily_loss / capital) * 100 if capital > 0 else 0
+        msg = (
+            f"🚨 <b>[서킷브레이커 발동]</b>\n"
+            f"일일 손실: {self._format_krw(daily_loss)} ({ratio:.1f}%)\n"
+            f"봇을 일시 중단합니다."
+        )
+        self.send(msg)
+
+    async def start_command_listener(self):
+        """텔레그램 명령어 수신 루프"""
+        if not _HAS_TELEGRAM:
+            return
+        app = Application.builder().token(self.bot_token).build()
+
+        async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+            await update.message.reply_text("🤖 봇 정상 동작 중입니다.")
+
+        async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+            await update.message.reply_text("📋 /positions: 포트폴리오 모듈에서 조회하세요.")
+
+        async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+            await update.message.reply_text("💰 /pnl: 손익 정보를 불러오는 중입니다.")
+
+        async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+            if self._on_stop:
+                self._on_stop()
+            await update.message.reply_text("🛑 봇 중지 명령을 수신했습니다.")
+
+        async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+            if self._on_resume:
+                self._on_resume()
+            await update.message.reply_text("▶️ 봇 재개 명령을 수신했습니다.")
+
+        app.add_handler(CommandHandler("status", cmd_status))
+        app.add_handler(CommandHandler("positions", cmd_positions))
+        app.add_handler(CommandHandler("pnl", cmd_pnl))
+        app.add_handler(CommandHandler("stop", cmd_stop))
+        app.add_handler(CommandHandler("resume", cmd_resume))
+
+        self._app = app
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        logger.info("텔레그램 명령어 리스너 시작")

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoTrade Bot Dashboard</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="container">
+  <!-- Header -->
+  <header class="header">
+    <h1>🤖 AutoTrade Bot Dashboard</h1>
+    <div class="header-right">
+      <span id="bot-status" class="status-badge status-running">● RUNNING</span>
+      <button id="btn-stop" class="btn btn-danger" onclick="toggleBot()">STOP</button>
+    </div>
+  </header>
+
+  <!-- Summary Cards -->
+  <div class="cards-grid">
+    <div class="card">
+      <div class="card-label">총 자산</div>
+      <div class="card-value" id="total-asset">₩0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">오늘 손익</div>
+      <div class="card-value" id="daily-pnl">+₩0</div>
+      <div class="card-sub" id="daily-pnl-ratio">+0.00%</div>
+    </div>
+    <div class="card">
+      <div class="card-label">승률</div>
+      <div class="card-value" id="win-rate">0%</div>
+      <div class="card-sub" id="win-count">0/0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">활성 포지션</div>
+      <div class="card-value" id="active-positions">0종목</div>
+    </div>
+  </div>
+
+  <!-- PnL Chart -->
+  <div class="section">
+    <h2>누적 손익</h2>
+    <div class="chart-container">
+      <canvas id="pnl-chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Positions Table -->
+  <div class="section">
+    <h2>현재 포지션</h2>
+    <div class="table-wrapper">
+      <table class="data-table" id="positions-table">
+        <thead>
+          <tr>
+            <th>종목</th><th>거래소</th><th>전략</th><th>진입가</th>
+            <th>현재가</th><th>손익</th><th>손절가</th><th>목표가</th>
+          </tr>
+        </thead>
+        <tbody id="positions-body">
+          <tr><td colspan="8" class="empty">포지션 없음</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Recent Trades Table -->
+  <div class="section">
+    <h2>최근 거래 이력</h2>
+    <div class="table-wrapper">
+      <table class="data-table" id="trades-table">
+        <thead>
+          <tr>
+            <th>시간</th><th>거래소</th><th>종목</th><th>전략</th>
+            <th>매수/매도</th><th>가격</th><th>수량</th><th>손익</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body">
+          <tr><td colspan="8" class="empty">거래 내역 없음</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Strategy Stats -->
+  <div class="section">
+    <h2>전략별 성과</h2>
+    <div class="table-wrapper">
+      <table class="data-table" id="strategy-table">
+        <thead>
+          <tr>
+            <th>전략</th><th>거래수</th><th>승률</th><th>평균 수익</th><th>누적 손익</th>
+          </tr>
+        </thead>
+        <tbody id="strategy-body">
+          <tr><td colspan="5" class="empty">데이터 없음</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/dashboard.js"></script>
+</body>
+</html>

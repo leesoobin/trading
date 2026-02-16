@@ -1,0 +1,49 @@
+upbit:
+  access_key: "YOUR_UPBIT_ACCESS_KEY"
+  secret_key: "YOUR_UPBIT_SECRET_KEY"
+
+kis:
+  app_key: "YOUR_KIS_APP_KEY"
+  app_secret: "YOUR_KIS_APP_SECRET"
+  account_no: "12345678"          # 8자리 계좌번호
+  account_product_code: "01"      # 상품코드 (일반: 01)
+  hts_id: "YOUR_HTS_ID"
+  is_paper_trading: true          # true=모의투자, false=실투자
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+
+strategy:
+  upbit:
+    enabled: true
+    symbols: ["KRW-BTC", "KRW-ETH", "KRW-SOL"]
+    active_strategies: ["trend_following", "rsi_reversal", "bollinger_breakout"]
+    candle_interval: "15"    # 분봉 (1/3/5/15/60/240)
+
+  kis_domestic:
+    enabled: true
+    symbols: ["005930", "000660"]  # 삼성전자, SK하이닉스
+    active_strategies: ["trend_following", "rsi_reversal"]
+
+  kis_overseas:
+    enabled: true
+    market: "NAS"             # NAS=나스닥, NYS=뉴욕, AMS=아멕스
+    symbols: ["AAPL", "NVDA", "TSLA"]
+    active_strategies: ["trend_following"]
+
+risk:
+  max_position_ratio: 0.06     # 종목당 최대 6% (Kelly Criterion)
+  max_daily_loss_ratio: 0.02   # 일일 최대 손실 2% (서킷브레이커)
+  stop_loss_ratio: 0.03        # 손절 3%
+  take_profit_ratio: 0.06      # 익절 6%
+  max_concurrent_positions: 5  # 동시 보유 최대 5종목
+
+indicators:
+  rsi_period: 14
+  rsi_oversold: 30
+  rsi_overbought: 70
+  ma_short: 20
+  ma_long: 200
+  bollinger_period: 20
+  bollinger_std: 2.0
