@@ -6,7 +6,7 @@ import asyncio
 import logging
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
@@ -47,6 +47,15 @@ STRATEGY_MAP = {
     "bollinger_breakout": BollingerBreakoutStrategy,
     "ma_pullback":       MAPullbackStrategy,
     "mtf_structure":     MTFStructureStrategy,
+}
+
+# 전략별 최대 보유일 (초과 시 강제 청산)
+# TurtleStrategy: 제한 없음 (추세가 이어지는 한 유지)
+MAX_HOLD_DAYS: dict[str, int] = {
+    "BollingerBreakoutStrategy": 3,
+    "MTFStructureStrategy":      3,
+    "TrendFollowingStrategy":    14,
+    "MAPullbackStrategy":        14,
 }
 
 
@@ -144,7 +153,7 @@ class AutoTradeBot:
                 current_price = float(df_ltf["close"].iloc[-1])
                 self.portfolio.update_price("upbit", symbol, current_price)
 
-                # 보유 포지션 손절/익절 체크
+                # 보유 포지션 손절/익절/기간초과 체크
                 pos = self.portfolio.get_position("upbit", symbol)
                 if pos:
                     if self.risk.check_stop_loss(pos.entry_price, current_price, pos.side):
@@ -154,6 +163,13 @@ class AutoTradeBot:
                     if pos.take_profit_price > 0 and current_price >= pos.take_profit_price:
                         await self._execute_sell("upbit", symbol, current_price, pos, "익절")
                         continue
+                    # 최대 보유 기간 초과 체크
+                    max_days = MAX_HOLD_DAYS.get(pos.strategy)
+                    if max_days:
+                        days_held = (datetime.now() - pos.entry_time.replace(tzinfo=None)).days
+                        if days_held >= max_days:
+                            await self._execute_sell("upbit", symbol, current_price, pos, f"보유기간 초과 ({days_held}일)")
+                            continue
 
                 # 전략별 라우팅
                 for strategy in strategies:
@@ -237,6 +253,13 @@ class AutoTradeBot:
                     if pos.take_profit_price > 0 and current_price >= pos.take_profit_price:
                         await self._execute_sell("kis_domestic", symbol, current_price, pos, "익절")
                         continue
+                    # 최대 보유 기간 초과 체크
+                    max_days = MAX_HOLD_DAYS.get(pos.strategy)
+                    if max_days:
+                        days_held = (datetime.now() - pos.entry_time.replace(tzinfo=None)).days
+                        if days_held >= max_days:
+                            await self._execute_sell("kis_domestic", symbol, current_price, pos, f"보유기간 초과 ({days_held}일)")
+                            continue
 
                 for strategy in strategies:
                     sname = strategy.name
@@ -319,6 +342,13 @@ class AutoTradeBot:
                     if pos.take_profit_price > 0 and current_price >= pos.take_profit_price:
                         await self._execute_sell("kis_overseas", symbol, current_price, pos, "익절", market=ovs_market)
                         continue
+                    # 최대 보유 기간 초과 체크
+                    max_days = MAX_HOLD_DAYS.get(pos.strategy)
+                    if max_days:
+                        days_held = (datetime.now() - pos.entry_time.replace(tzinfo=None)).days
+                        if days_held >= max_days:
+                            await self._execute_sell("kis_overseas", symbol, current_price, pos, f"보유기간 초과 ({days_held}일)", market=ovs_market)
+                            continue
 
                 for strategy in strategies:
                     sname = strategy.name

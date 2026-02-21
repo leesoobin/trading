@@ -7,7 +7,7 @@
 
 업비트(코인) + 한국투자증권(국내/해외 주식) 자동매매봇.
 - **언어**: Python 3.11+, `.venv` 가상환경
-- **실행**: `python main.py` (봇 + FastAPI 대시보드 동시 실행)
+- **실행**: `bash start.sh` (백그라운드 실행, 기존 프로세스 자동 종료)
 - **API 키 위치**: `config.yaml` (gitignore — 절대 커밋 금지)
 - **실전 운용 중**: KIS `is_paper_trading: false`, 업비트 실계좌
 - **운용 자본**: 업비트 ~100만원 + KIS ~100만원 = 총 ~200만원
@@ -48,16 +48,18 @@
 # smc, smc_ob_pullback, smc_liquidity_sweep, smc_range, smc_golden_ob, rsi_reversal
 ```
 
-### 전략별 손절/익절 방식
+### 전략별 손절/익절/최대보유기간
 
-| 전략 | 손절 | 익절/청산 |
-|------|------|----------|
-| **MTFStructureStrategy** | LTF 스윙 저점 (전략 계산) | HTF 스윙 고점 (전략 계산) |
-| **BollingerBreakoutStrategy** | -3% 안전망 | 볼린저 중심선(MA20) 도달 시 매도 |
-| **TurtleStrategy** | -3% 안전망 | 10일/20일 최저가 이탈 시 매도 |
-| **TrendFollowingStrategy** | -3% 안전망 | MA20 < MA200 데드크로스 시 매도 |
+| 전략 | 손절 | 익절/청산 | 최대 보유 |
+|------|------|----------|----------|
+| **MTFStructureStrategy** | LTF 스윙 저점 | HTF 스윙 고점 (전략 계산) | **3일** |
+| **BollingerBreakoutStrategy** | -3% 안전망 | 볼린저 중심선(MA20) 도달 | **3일** |
+| **TrendFollowingStrategy** | -3% 안전망 | MA20 < MA200 데드크로스 | **14일** |
+| **MAPullbackStrategy** | -3% 안전망 | EMA 역배열 | **14일** |
+| **TurtleStrategy** | -3% 안전망 | 10일/20일 최저가 이탈 | **제한 없음** |
 
-→ `pos.take_profit_price > 0`이면 MTF (고정 TP 있음), `== 0`이면 전략 신호로만 청산
+→ `main.py`의 `MAX_HOLD_DAYS` 딕셔너리에서 관리
+→ `pos.take_profit_price > 0`이면 MTF (고정 TP), `== 0`이면 전략 신호로만 청산
 
 ---
 
@@ -89,7 +91,8 @@
 
 ## 주요 구현 패턴 및 주의사항
 
-### 중복 실행 방지
+### 봇 시작/재시작
+- `bash start.sh`: 기존 포트 8080 프로세스 종료 + bot.lock 정리 + 백그라운드 실행
 - `bot.lock` 파일로 단일 인스턴스 보장 (`fcntl.flock`)
 - 이미 실행 중이면 즉시 종료
 
@@ -157,3 +160,4 @@ df_daily = upbit.get_daily_candles(symbol, count=400)
 - [ ] 총자산 주기적 갱신 (현재 봇 시작 시 1회)
 - [ ] 스크리닝 결과 대시보드 표시
 - [ ] mtf_structure 거래수 확대 검증
+- [x] 최대 보유 기간 강제 청산 (볼린저/MTF 3일, 추세추종 14일)
