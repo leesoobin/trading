@@ -104,6 +104,32 @@ class BotScheduler:
             replace_existing=True,
         )
 
+    def add_screening_jobs(self, screen_upbit, screen_kr, screen_us):
+        """새벽 배치 스크리닝 스케줄 등록
+        - 00:30 KST: 업비트 코인 스크리닝
+        - 06:00 KST: 미국장 마감 후 해외 스크리닝
+        - 16:30 KST: 한국장 마감 후 국내 스크리닝
+        """
+        self._scheduler.add_job(
+            screen_upbit,
+            trigger=CronTrigger(hour=0, minute=30, timezone=KST),
+            id="screen_upbit",
+            replace_existing=True,
+        )
+        self._scheduler.add_job(
+            screen_us,
+            trigger=CronTrigger(hour=6, minute=0, day_of_week="mon-sat", timezone=KST),
+            id="screen_us",
+            replace_existing=True,
+        )
+        self._scheduler.add_job(
+            screen_kr,
+            trigger=CronTrigger(hour=16, minute=30, day_of_week="mon-fri", timezone=KST),
+            id="screen_kr",
+            replace_existing=True,
+        )
+        logger.info("스크리닝 스케줄 등록: 00:30(업비트) / 06:00(미국) / 16:30(국내)")
+
     def start(self):
         self._scheduler.start()
         logger.info("스케줄러 시작")

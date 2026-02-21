@@ -120,6 +120,24 @@ class Storage:
             })
         return stats
 
+    def get_open_positions(self) -> list[dict]:
+        """재시작 후 복원용: 매수 후 매도 없는 미청산 포지션"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT t.*
+                   FROM trades t
+                   WHERE t.side = 'buy'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM trades t2
+                       WHERE t2.exchange = t.exchange
+                       AND t2.symbol = t.symbol
+                       AND t2.side = 'sell'
+                       AND t2.timestamp > t.timestamp
+                   )
+                   ORDER BY t.timestamp ASC"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_daily_summary(self) -> dict:
         today = date.today().isoformat()
         with self._conn() as conn:

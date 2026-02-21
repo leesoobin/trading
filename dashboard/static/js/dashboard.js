@@ -16,9 +16,11 @@ let botRunning = true;
 function fmt(num) {
   if (num === null || num === undefined) return '-';
   const abs = Math.abs(num);
-  if (abs >= 1_000_000) return (num / 1_000_000).toFixed(2) + 'M';
-  if (abs >= 1_000) return (num / 1_000).toFixed(1) + 'k';
-  return num.toFixed(0);
+  if (abs >= 1_000) return num.toLocaleString('ko-KR', { maximumFractionDigits: 0 });
+  if (abs >= 1) return num.toFixed(2);
+  if (abs >= 0.0001) return num.toFixed(6);
+  if (abs === 0) return '0';
+  return num.toFixed(8);
 }
 
 function fmtMoney(num) {
@@ -124,7 +126,7 @@ async function loadPositions() {
         <td>₩${fmt(p.current_price)}</td>
         <td class="${colorClass(p.pnl_ratio)}">${fmtPct(p.pnl_ratio)}<br><small>${fmtMoney(p.pnl)}</small></td>
         <td class="negative">₩${fmt(p.stop_price)}</td>
-        <td class="positive">₩${fmt(p.take_profit_price)}</td>
+        <td class="positive">${p.take_profit_price > 0 ? '₩' + fmt(p.take_profit_price) : '전략 신호'}</td>
       </tr>
     `).join('');
   } catch (e) { console.error('positions error', e); }

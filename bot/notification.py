@@ -25,11 +25,16 @@ class TelegramNotifier:
         self._app = None
 
     def _format_krw(self, amount: float) -> str:
-        if abs(amount) >= 1_000_000:
-            return f"₩{amount/1_000_000:.2f}M"
-        elif abs(amount) >= 1_000:
-            return f"₩{amount/1_000:.1f}k"
-        return f"₩{amount:.0f}"
+        abs_val = abs(amount)
+        if abs_val >= 1_000:
+            return f"₩{amount:,.0f}"
+        elif abs_val >= 1:
+            return f"₩{amount:.2f}"
+        elif abs_val >= 0.0001:
+            return f"₩{amount:.6f}"
+        elif abs_val == 0:
+            return "₩0"
+        return f"₩{amount:.8f}"
 
     async def send_message(self, text: str):
         if not _HAS_TELEGRAM:
@@ -53,17 +58,30 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"텔레그램 send 오류: {e}")
 
+    # 전략별 청산 조건 설명
+    _EXIT_CONDITIONS = {
+        "BollingerBreakoutStrategy": "볼린저 중심선(MA20) 도달 시 매도",
+        "TurtleStrategy": "10일/20일 최저가 이탈 시 매도",
+        "TrendFollowingStrategy": "MA20 < MA200 데드크로스 시 매도",
+        "MAPullbackStrategy": "EMA 역배열 시 매도",
+    }
+
     def notify_buy(self, exchange: str, symbol: str, strategy: str,
                    price: float, stop_price: float, take_profit: float,
                    position_ratio: float):
         stop_pct = (stop_price - price) / price * 100
-        tp_pct = (take_profit - price) / price * 100
+        if take_profit > 0:
+            tp_pct = (take_profit - price) / price * 100
+            exit_line = f"목표가: {self._format_krw(take_profit)} ({tp_pct:+.1f}%)\n"
+        else:
+            exit_cond = self._EXIT_CONDITIONS.get(strategy, "전략 신호 발생 시 매도")
+            exit_line = f"청산조건: {exit_cond}\n"
         msg = (
             f"📈 <b>[매수 신호] {symbol}</b>\n"
             f"거래소: {exchange}\n"
             f"전략: {strategy}\n"
             f"현재가: {self._format_krw(price)}\n"
-            f"목표가: {self._format_krw(take_profit)} ({tp_pct:+.1f}%)\n"
+            f"{exit_line}"
             f"손절가: {self._format_krw(stop_price)} ({stop_pct:+.1f}%)\n"
             f"포지션: 잔고의 {position_ratio:.1%}"
         )

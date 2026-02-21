@@ -10,16 +10,15 @@
 
 ## 📌 개요
 
-한국 트레이딩봇 커뮤니티(TigerBot, DeepDive_KR 등) 사례를 참고하여 구현한
-**텔레그램 알림 + 5가지 전략 + Kelly Criterion 리스크 관리**를 갖춘 자동매매봇.
-
 | 항목 | 내용 |
 |------|------|
 | **거래소** | 업비트 (암호화폐) · 한국투자증권 (국내/해외 주식) |
-| **전략** | 추세추종 · RSI 역추세 · 볼린저밴드 · SMC · 터틀 |
+| **전략** | MTF 구조 매핑 · 터틀 · 추세추종 · 볼린저밴드 |
+| **종목 발굴** | 새벽 배치 스크리닝 → 장중 멀티 타임프레임 모니터링 |
 | **리스크** | Kelly Criterion 포지션 사이징 · 서킷브레이커 |
-| **알림** | 텔레그램 봇 (매수/매도/일일 리포트) |
+| **알림** | 텔레그램 봇 (매수/매도/일일 리포트/명령 수신) |
 | **대시보드** | FastAPI + Chart.js 웹 UI (`http://localhost:8080`) |
+| **운용 자본** | 업비트 100만원 + KIS 100만원 = 총 200만원 (2026-02-21 기준) |
 | **언어** | Python 3.11+ |
 
 ---
@@ -28,409 +27,287 @@
 
 ```
 money/
-├── config.yaml                  # API 키 + 전략 설정 (gitignore)
-├── config.example.yaml          # 설정 템플릿 (커밋용)
-├── requirements.txt
+├── config.yaml                  # API 키 + 전략 설정 (gitignore — 절대 커밋 금지)
 ├── main.py                      # 봇 진입점 (봇 + 대시보드 동시 실행)
+├── bot.lock                     # 중복 실행 방지 락 파일 (자동 생성/삭제)
+├── trades.db                    # 거래 이력 SQLite
+│
 ├── bot/
 │   ├── config.py                # pyyaml 기반 설정 로더
 │   ├── exchange/
-│   │   ├── upbit.py             # Upbit REST 클라이언트
+│   │   ├── upbit.py             # Upbit REST 클라이언트 (분봉/일봉/잔고/주문)
 │   │   └── kis.py               # KIS OAuth2 + REST 클라이언트
 │   ├── strategy/
 │   │   ├── base.py              # Strategy ABC + Signal Enum
+│   │   ├── mtf_structure.py     # MTF 구조 매핑 (HTF 추세 + LTF BOS/ChoCh 진입)
 │   │   ├── trend_following.py   # 추세추종: MA 크로스오버 + 신고가 돌파
-│   │   ├── rsi_reversal.py      # RSI 역추세: RSI(14) 과매수/과매도
-│   │   ├── bollinger_breakout.py# 볼린저밴드: 브레이크아웃 + 평균회귀
-│   │   ├── smc.py               # SMC: 오더블록 + FVG + 유동성 스윕
-│   │   └── turtle.py            # 터틀: 도니안채널 + ATR 사이징 + 피라미딩
-│   ├── indicators.py            # 기술적 지표 (pandas-ta)
-│   ├── risk.py                  # Kelly Criterion + ATR 손절/익절
-│   ├── portfolio.py             # 포지션 상태 추적 + 손익 계산
-│   ├── notification.py          # 텔레그램 봇 알림 + 명령어
+│   │   ├── bollinger_breakout.py# 볼린저밴드: 상단 브레이크아웃 + 하단 평균회귀
+│   │   ├── turtle.py            # 터틀: 도니안채널 + ATR 사이징 + 피라미딩
+│   │   └── ma_pullback.py       # 이평선 눌림목 (보류 상태)
+│   ├── screener.py              # 새벽 배치 스크리닝 엔진
+│   ├── risk.py                  # Kelly Criterion + 손절/익절 계산
+│   ├── portfolio.py             # 포지션 상태 추적 (메모리)
+│   ├── notification.py          # 텔레그램 알림 + 명령어 수신
 │   ├── scheduler.py             # APScheduler + 장 운영시간 관리
-│   └── storage.py               # SQLite 거래 이력
+│   └── storage.py               # SQLite 거래 이력 저장/조회
+│
 ├── dashboard/
 │   ├── app.py                   # FastAPI 서버 + WebSocket
-│   ├── static/
-│   │   ├── css/style.css        # 다크 테마 스타일
-│   │   └── js/dashboard.js      # Chart.js 실시간 업데이트
-│   └── templates/
-│       └── index.html           # 메인 대시보드 HTML
+│   ├── static/js/dashboard.js   # Chart.js 실시간 업데이트 (소수점 가격 처리)
+│   └── templates/index.html     # 대시보드 HTML
+│
 ├── backtest/
 │   └── backtester.py            # 백테스팅 엔진 + CLI
-└── logs/
+└── logs/                        # 일별 로그 파일
 ```
 
 ---
 
 ## ⚡ 빠른 시작
 
-### 1. 의존성 설치
-
 ```bash
+# 1. 가상환경 + 의존성
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2. 설정 파일 작성
-
-```bash
+# 2. 설정
 cp config.example.yaml config.yaml
-```
+# config.yaml에 API 키 입력
 
-`config.yaml`을 편집하여 API 키와 매매 종목을 설정합니다:
-
-```yaml
-upbit:
-  access_key: "YOUR_UPBIT_ACCESS_KEY"
-  secret_key: "YOUR_UPBIT_SECRET_KEY"
-
-kis:
-  app_key: "YOUR_KIS_APP_KEY"
-  app_secret: "YOUR_KIS_APP_SECRET"
-  account_no: "12345678"
-  account_product_code: "01"
-  hts_id: "YOUR_HTS_ID"
-  is_paper_trading: true   # ← 반드시 true로 시작 (모의투자)
-
-telegram:
-  bot_token: "YOUR_BOT_TOKEN"
-  chat_id: "YOUR_CHAT_ID"
-
-strategy:
-  upbit:
-    enabled: true
-    symbols: ["KRW-BTC", "KRW-ETH", "KRW-SOL"]
-    active_strategies: ["trend_following", "rsi_reversal", "bollinger_breakout"]
-    candle_interval: "15"    # 분봉 (1/3/5/15/60/240)
-
-  kis_domestic:
-    enabled: true
-    symbols: ["005930", "000660"]   # 삼성전자, SK하이닉스
-    active_strategies: ["trend_following", "rsi_reversal"]
-
-  kis_overseas:
-    enabled: true
-    market: "NAS"              # NAS=나스닥, NYS=뉴욕, AMS=아멕스
-    symbols: ["AAPL", "NVDA", "TSLA"]
-    active_strategies: ["trend_following"]
-
-risk:
-  max_position_ratio: 0.06     # 종목당 최대 6%
-  max_daily_loss_ratio: 0.02   # 일일 최대 손실 2%
-  stop_loss_ratio: 0.03        # 손절 3%
-  take_profit_ratio: 0.06      # 익절 6%
-  max_concurrent_positions: 5  # 동시 보유 최대 5종목
-
-indicators:
-  rsi_period: 14
-  rsi_oversold: 30
-  rsi_overbought: 70
-  ma_short: 20
-  ma_long: 200
-  bollinger_period: 20
-  bollinger_std: 2.0
-```
-
-### 3. 봇 실행
-
-```bash
+# 3. 봇 실행
 python main.py
+# → http://localhost:8080 대시보드 확인
 ```
 
-봇과 대시보드가 동시에 실행됩니다.
-대시보드: **http://localhost:8080**
-
-### 4. 백테스트
-
-```bash
-# 샘플 데이터로 전략 검증
-python -m backtest.backtester --strategy trend_following --sample --days 500
-
-# 전략 선택: trend_following / rsi_reversal / bollinger_breakout / smc / turtle
-python -m backtest.backtester --strategy turtle --sample --days 365 --capital 10000000
-```
+> **중복 실행 방지**: 이미 봇이 실행 중인 상태에서 재실행하면 `bot.lock`으로 차단됩니다.
 
 ---
 
-## 🕐 운영 타임라인
+## 🔄 동작 흐름 (전체)
 
-config.yaml에 지정된 종목을 대상으로 **매 60초마다 전략 분석**을 수행한다.
-장 운영시간 가드가 적용되어 각 시장은 해당 거래시간에만 활성화된다.
+### 1단계 — 새벽 배치 스크리닝 (하루 3회)
+
+| 시각 (KST) | 대상 | 방법 |
+|-----------|------|------|
+| **00:30** | 업비트 코인 | 24h 거래대금 상위 40개 → 4H봉 HTF 기술점수 3점 이상 → 최대 30개 선별 |
+| **06:00** | 미국 NASDAQ (월~토) | 유니버스 100종목 → 일봉 분석 → 최대 100개 선별 |
+| **16:30** | KOSPI + KOSDAQ (월~금) | 거래량 상위 200개 → 일봉 분석 → KOSPI/KOSDAQ 구분 → 30개 선별 |
+
+스크리닝 결과가 없으면 `config.yaml`의 `symbols` 폴백 사용.
+
+### 2단계 — 장중 폴링 (60초마다)
+
+선별된 종목 대상으로 매 60초마다:
 
 ```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 한국 시간(KST) 기준 하루
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+① 데이터 수집 (종목당 API 3회)
+   - 4H봉 100개   → MTF 전략 HTF (추세 파악)
+   - 15분봉 200개  → MTF/볼린저 LTF (진입 시점)
+   - 일봉 400개    → 터틀/추세추종 (일봉 전략)
 
- 00:00  일일 손익 초기화
+② 현재가 업데이트
 
- 09:00  ─── 한국장 시작 ───
-   │    KIS 국내 전략 분석 활성화 (60초 간격)
-   │    지정 종목 일봉 조회 → 전략 시그널 → 매수/매도
+③ 보유 포지션 → 손절(-3%) / 익절(+6%) 체크 → 조건 충족 시 즉시 매도
 
- 15:20  ─── 한국장 마감 ───
-   │    KIS 국내 전략 분석 비활성화
-
- 16:00  일일 리포트 텔레그램 전송
-
- 22:30  ─── 미국장 시작 (서머타임 기준) ───
-   │    KIS 해외 전략 분석 활성화 (60초 간격)
-   │    지정 종목 일봉 조회 → 전략 시그널 → 매수/매도
-
- 05:00  ─── 미국장 마감 ───
-   │    KIS 해외 전략 분석 비활성화
-
- [반복]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 업비트 (24/7)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
- 상시  지정 종목 분봉 조회 → 전략 시그널 → 매수/매도 (60초 간격)
+④ 미보유 포지션 → 전략 신호 계산 → BUY 신호 + 포지션 여유 있으면 매수
 ```
 
----
+### 장 운영 시간
 
-## 📅 스케줄러 상세
-
-```python
-# 업비트 코인 (24/7)
-매 60초  → run_upbit_strategies()     # 지정 종목 분봉 조회 + 전략 분석
-
-# 한국 주식 (평일 09:00~15:20 KST)
-매 60초  → run_kis_domestic_strategies()  # 장중에만 실행 (가드 적용)
-
-# 미국 주식 (평일 22:30~05:00 KST, 서머타임 기준)
-매 60초  → run_kis_overseas_strategies()  # 장중에만 실행 (가드 적용)
-
-# 공통
-00:00 KST  → reset_daily_pnl()        # 일일 손익 초기화
-16:00 KST  → send_daily_report()      # 텔레그램 리포트
-```
-
-| 작업 | 실행 시간 | 방식 |
-|------|---------|------|
-| 업비트 전략 분석 | 상시 (60초 간격) | REST 분봉 조회 |
-| 한국 주식 전략 분석 | 평일 09:00~15:20 KST | REST 일봉 조회 |
-| 미국 주식 전략 분석 | 평일 22:30~05:00 KST | REST 일봉 조회 |
-| 일일 리포트 | 16:00 KST | 텔레그램 |
+| 시장 | 운영 시간 | 요일 |
+|------|----------|------|
+| 업비트 (코인) | 24/7 | 매일 |
+| KIS 국내 | 09:00 ~ 15:20 KST | 평일 |
+| KIS 해외 (미국) | 22:30 ~ 05:00 KST (서머타임) / 23:30 ~ 06:00 (겨울) | 평일 |
 
 ---
 
 ## 📈 전략 상세
 
-### 1. 추세추종 (Trend Following)
+### 전략별 타임프레임
 
-MA 크로스오버와 52주 신고가를 결합한 전략.
+| 전략 | HTF (추세) | LTF (진입) | 대상 |
+|------|-----------|-----------|------|
+| **MTFStructureStrategy** | 4H봉 (코인) / 일봉 (주식) | 15분봉 / 60분봉 / 30분봉 | 전체 |
+| **BollingerBreakoutStrategy** | — | 15분봉 | 업비트 |
+| **TurtleStrategy** | — | 일봉 | 전체 |
+| **TrendFollowingStrategy** | — | 일봉 | 전체 |
+
+### MTF 구조 매핑 (`mtf_structure`)
+
+HTF로 추세를 파악하고 LTF에서 BOS/ChoCh 진입:
+
+```
+HTF 스윙 분석:
+  HH+HL 2회 이상 → "bullish" → Long 진입 대기
+  LH+LL 2회 이상 → "bearish" → Exit 신호
+  그 외           → "neutral" → HOLD
+
+HTF bullish일 때 LTF에서:
+  조정 구간 감지 (LTF 저점 하락, 최소 3캔들)
+  → ChoCh: 하락 중 직전 고점 상향 돌파 → BUY
+  → BOS:   조정 후 새 고점 형성 → BUY
+  SL = 직전 LTF 스윙 저점
+  TP = HTF 마지막 저항선 (스윙 고점)
+```
+
+### 볼린저밴드 (`bollinger_breakout`)
 
 | 신호 | 조건 |
 |------|------|
-| **매수** | MA20 > MA200 (골든크로스) + 전일비 +1% 이상 + 거래량 평균 150%↑ |
-| **매수** | 52주 신고가 돌파 (DeepDive_KR 방식) |
-| **매도** | MA20 < MA200 (데드크로스) |
+| 매수 | 볼린저 상단 돌파 + 거래량 급증 |
+| 매수 | 볼린저 하단 이탈 후 반등 |
+| 매도 | 볼린저 중심선(MA20) 도달 |
 
-### 2. RSI 역추세 (RSI Reversal)
+### 터틀 (`turtle`)
 
-RSI(14) 과매수/과매도 구간을 이용한 역추세 전략.
+| 항목 | System 1 | System 2 |
+|------|----------|----------|
+| 진입 | 20일 최고가 돌파 | 55일 최고가 돌파 |
+| 청산 | 10일 최저가 이탈 | 20일 최저가 이탈 |
+| 사이징 | Unit = (자본×1%) / (ATR×가격) | 동일 |
+| 피라미딩 | 0.5 ATR 상승마다 +1 Unit (최대 4) | 동일 |
 
-| 신호 | 조건 |
-|------|------|
-| **매수** | RSI < 30 탈출 (과매도 → 반등) + MA200 위 |
-| **매도** | RSI > 70 (과매수 진입) |
-
-### 3. 볼린저밴드 (Bollinger Breakout)
-
-상단 브레이크아웃과 하단 평균회귀를 모두 지원.
+### 추세추종 (`trend_following`)
 
 | 신호 | 조건 |
 |------|------|
-| **매수 (브레이크아웃)** | 볼린저 상단 돌파 + 거래량 급증 |
-| **매수 (평균회귀)** | 볼린저 하단 이탈 후 반등 |
-| **매도** | 볼린저 중심선(MA20) 도달 |
-
-### 4. SMC (Smart Money Concepts)
-
-기관 투자자(스마트머니)의 발자국을 추적.
-
-```
-Order Block (OB)
-  └─ 불리시 OB: 하락 후 강한 상승 전환점의 마지막 하락 캔들
-  └─ 베어리시 OB: 상승 후 강한 하락 전환점의 마지막 상승 캔들
-
-Fair Value Gap (FVG)
-  └─ 3개 캔들 기준 갭 구간 → 가격이 채우러 돌아올 때 진입
-
-Break of Structure (BoS) / CHoCH
-  └─ BoS: 추세 지속 확인 / CHoCH: 추세 전환 신호
-
-Liquidity Sweep
-  └─ 이전 고점/저점 일시 돌파 후 반전 (스톱헌팅 후 실방향)
-```
-
-| 신호 | 조건 |
-|------|------|
-| **매수** | 불리시 OB 터치 + BoS 확인 OR FVG 채움 + CHoCH 상승 |
-| **매수** | 저점 유동성 스윕 후 반전 |
-| **매도** | 베어리시 OB 터치 OR 고점 유동성 스윕 후 반전 |
-
-### 5. 터틀 트레이딩 (Turtle Trading)
-
-Richard Dennis & William Eckhardt의 클래식 추세추종 시스템 (1983).
-
-| 항목 | System 1 (단기) | System 2 (장기) |
-|------|----------------|----------------|
-| **진입** | 20일 최고가 돌파 | 55일 최고가 돌파 |
-| **청산** | 10일 최저가 이탈 | 20일 최저가 이탈 |
-| **필터** | 직전 신호 수익 시 스킵 | 없음 |
-
-**Unit 시스템 (ATR 기반 포지션 사이징)**
-```
-Unit 수량 = (자본 × 1%) / (ATR × 가격)
-피라미딩: 진입 후 0.5 ATR 상승마다 1 Unit 추가 (최대 4 Units)
-손절: 진입가 대비 2 ATR 이탈 시 전체 청산
-```
+| 매수 | MA20 > MA200 + 전일비 +1%↑ + 거래량 평균 150%↑ |
+| 매수 | 52주 신고가 돌파 |
+| 매도 | MA20 < MA200 (데드크로스) |
 
 ---
 
 ## 🛡️ 리스크 관리
 
-### Kelly Criterion (켈리 공식)
+### 포지션 사이징 (Kelly Criterion)
 
 ```
 f* = (b × p - q) / b
-  b = 수익비 (익절/손절)
-  p = 승률
-  q = 1 - p
+  b = 수익비 (익절6% ÷ 손절3% = 2.0)
+  p = 승률 (0.55 가정)
 
-Half-Kelly 적용 (보수적 운용) + 종목당 최대 6% 캡
+Half-Kelly 적용 후 종목당 최대 6% 캡
+∴ 매수금액 = 총자산(200만원) × 6% ≈ 120,000원/종목
 ```
+
+### 손절/익절
+
+| 항목 | 기준 |
+|------|------|
+| 손절 | 진입가 대비 **-3%** (자동 매도) |
+| 익절 | 진입가 대비 **+6%** (자동 매도) |
+| MTF 전략 | 손절 = LTF 스윙 저점, 익절 = HTF 스윙 고점 (전략 자체 계산) |
 
 ### 서킷브레이커
 
-- 일일 손실이 전체 자산의 **2%** 도달 시 당일 거래 자동 중단
-- 텔레그램으로 즉시 알림 발송
-- `/resume` 명령으로 재개 가능
+- 일일 손실이 총자산의 **-2%** 도달 시 당일 신규 매수 중단
+- 텔레그램 즉시 알림
+- `/resume` 명령으로 재개
+
+### 포지션 수 제한
+
+- 동시 최대 보유 종목: **`config.yaml`의 `max_concurrent_positions`** (현재 5)
+- 동일 종목은 중복 매수 없음 (포지션 연 전략만 청산 가능)
 
 ---
 
-## 📊 대시보드
+## 🔄 재시작 시 포지션 복원
 
-`http://localhost:8080`에서 실시간 모니터링.
+포트폴리오는 **메모리**에만 저장되므로, 봇 재시작 시 `trades.db`에서 미청산 포지션을 자동 복원합니다:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  AutoTrade Bot Dashboard              [RUNNING] 🟢  [STOP]  │
-├──────────────┬──────────────┬──────────────┬────────────────┤
-│ 총 자산      │ 오늘 손익    │ 승률         │ 활성 포지션    │
-│ ₩15,234,500  │ +₩67,000     │ 75% (3/4)    │ 3종목          │
-├──────────────┴──────────────┴──────────────┴────────────────┤
-│                     누적 손익 차트 (Chart.js)                │
-├─────────────────────────────────────────────────────────────┤
-│ 현재 포지션  종목 | 거래소 | 전략 | 진입가 | 손익 | 비중    │
-├─────────────────────────────────────────────────────────────┤
-│ 최근 거래 이력 (최근 20건)                                   │
-├─────────────────────────────────────────────────────────────┤
-│ 전략별 성과  전략 | 거래수 | 승률 | 평균수익 | 누적손익     │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**WebSocket 실시간 업데이트** (10초 주기)
+- DB에서 매수 후 매도 기록이 없는 종목 조회
+- 동일 종목 여러 건은 **평균가 + 합산 수량**으로 병합
+- 복원된 포지션의 손절/익절가는 진입 평균가 기준으로 재계산
 
 ---
 
-## 📱 텔레그램 알림
+## 📊 대시보드 (`http://localhost:8080`)
 
-### 매수 신호 예시
-```
-📈 [매수 신호] KRW-BTC
-거래소: upbit
-전략: 추세추종 (MA골든크로스)
-현재가: ₩142.5M
-목표가: ₩150.8M (+5.8%)
-손절가: ₩138.2M (-3.0%)
-포지션: 잔고의 5.2%
-```
+| 섹션 | 내용 |
+|------|------|
+| 총 자산 | 업비트 KRW + 코인 평가액 + KIS 자본 합산 |
+| 오늘 손익 | 당일 청산 거래 기준 실현 손익 |
+| 현재 포지션 | 종목/거래소/전략/진입가/현재가/손절가/목표가/손익 |
+| 최근 거래 이력 | 최근 20건 |
+| 전략별 성과 | 전략별 거래수/승률/누적손익 |
 
-### 일일 리포트 예시
-```
-📊 [일일 리포트] 2026-02-19
-업비트: +2.3% | 손익: +₩46,000
-KIS 국내: +1.1% | 손익: +₩33,000
-KIS 해외: -0.5% | 손익: -₩12,000
-총 손익: +₩67,000 | 승률: 3/4 (75%)
-```
+모든 가격은 소수점 완전 표시 (K/M 약자 없음 — 소액 코인 대응).
 
-### 지원 명령어
+---
+
+## 📱 텔레그램 명령어
 
 | 명령어 | 설명 |
 |--------|------|
-| `/status` | 봇 상태 조회 |
-| `/positions` | 현재 포지션 조회 |
+| `/status` | 봇 상태 |
+| `/positions` | 현재 포지션 |
 | `/pnl` | 손익 현황 |
-| `/stop` | 봇 즉시 중지 |
+| `/stop` | 봇 중지 |
 | `/resume` | 봇 재개 |
 
 ---
 
-## 🔌 API 엔드포인트
+## 📊 백테스트 결과 (2026-02-21)
 
-| Method | Path | 설명 |
-|--------|------|------|
-| `GET` | `/` | 대시보드 메인 |
-| `GET` | `/api/summary` | 총 자산 / 오늘 손익 / 승률 |
-| `GET` | `/api/positions` | 현재 포지션 목록 |
-| `GET` | `/api/trades` | 최근 거래 이력 |
-| `GET` | `/api/pnl-chart` | 누적 손익 차트 데이터 |
-| `GET` | `/api/strategy-stats` | 전략별 성과 통계 |
-| `POST` | `/api/bot/stop` | 봇 중지 |
-| `POST` | `/api/bot/resume` | 봇 재개 |
-| `WS` | `/ws` | 실시간 포지션/가격 업데이트 |
+> 초기자본 1,000만원 / 포지션 5% / 손절 3% / 익절 6%
 
----
+| 전략 | 봉 | 승률 | 총손익 | 상태 |
+|------|-----|------|--------|------|
+| turtle | 일봉 | 55.3% | +348,965원 | ✅ 우수 |
+| trend_following | 일봉 | 56.2% | +330,841원 | ✅ 우수 |
+| bollinger_breakout | 1H | 55.8% | +187,542원 | ✅ 양호 |
+| mtf_structure | 15분 LTF | — | — | 🆕 실거래 검증 중 |
+| ~~smc 계열 5종~~ | — | — | — | ❌ 제거 (승률 불량) |
 
-## 📦 의존성
-
-```
-pyupbit              # 업비트 공식 Python 래퍼
-requests             # HTTP 클라이언트
-httpx                # 비동기 HTTP 클라이언트
-websockets           # WebSocket 클라이언트
-pandas               # 데이터프레임 처리
-numpy                # 수치 계산
-pandas-ta            # 기술적 지표 (RSI, MA, BB, MACD, ATR, 도니안채널)
-python-telegram-bot  # 텔레그램 봇
-apscheduler          # 스케줄러
-pyyaml               # config.yaml 로딩
-PyJWT                # JWT 토큰 생성 (업비트 인증)
-cryptography         # 해시키 생성 (KIS 인증)
-fastapi              # 대시보드 웹 서버
-uvicorn              # FastAPI ASGI 서버
-jinja2               # HTML 템플릿 엔진
-python-multipart     # 폼 데이터 파싱
-aiofiles             # 비동기 파일 I/O (정적 파일 서빙)
+```bash
+# 백테스트 실행
+.venv/bin/python -m backtest.backtester
 ```
 
 ---
 
-## ✅ 검증 순서
+## ⚙️ config.yaml 주요 설정
 
-1. **KIS 모의투자 테스트** — `is_paper_trading: true`로 실제 자금 위험 없이 테스트
-2. **업비트 잔고 조회** — API 연결 및 인증 확인
-3. **텔레그램 알림** — `/status` 명령 응답 확인
-4. **백테스트** — 전략별 과거 데이터 성능 검증
-5. **대시보드** — `http://localhost:8080` 브라우저 확인
-6. **소액 실투자** — 모든 검증 후 `is_paper_trading: false` 전환
+```yaml
+risk:
+  max_position_ratio: 0.06       # 종목당 최대 6%
+  max_daily_loss_ratio: 0.02     # 일일 최대 손실 2%
+  stop_loss_ratio: 0.03          # 손절 3%
+  take_profit_ratio: 0.06        # 익절 6%
+  max_concurrent_positions: 5    # 동시 보유 최대 5종목
+
+strategy:
+  upbit:
+    active_strategies: ["mtf_structure", "turtle", "trend_following", "bollinger_breakout"]
+  kis_domestic:
+    active_strategies: ["mtf_structure", "turtle", "trend_following"]
+  kis_overseas:
+    market: "NAS"                # NASDAQ만
+    active_strategies: ["mtf_structure", "turtle", "trend_following"]
+```
 
 ---
 
 ## ⚠️ 주의사항
 
-- `config.yaml`은 `.gitignore`에 포함 — **절대 커밋 금지**
-- KIS는 반드시 `is_paper_trading: true`로 시작
-- 미국 서머타임(3월~11월)은 22:30 시작, 겨울(11월~3월)은 23:30 시작
-- 텔레그램 `/stop` 명령으로 언제든지 봇 중지 가능
+- `config.yaml`은 `.gitignore` 포함 — **절대 커밋 금지**
+- KIS는 최초 `is_paper_trading: true`로 검증 후 실전 전환
+- KIS OAuth2 토큰: **1분당 1회** 발급 제한 (EGW00133 오류 시 1분 대기)
+- KIS 국내 거래량 순위 API: 장중(09:00~15:20)에만 동작, 주말/장마감 후 404
+- 미국 서머타임(3월~11월) 22:30 / 겨울(11월~3월) 23:30 시작
+- 봇은 **단일 인스턴스**로만 실행 (`bot.lock` 중복 방지)
+- 포지션은 메모리 저장 → 재시작 시 DB에서 자동 복원
 - 투자에는 항상 원금 손실 위험이 있습니다
+
+---
+
+## 🚧 미구현 / 개선 예정
+
+- [ ] 스크리닝 결과 대시보드 표시
+- [ ] KIS 잔고 API 연동 (현재 100만원 하드코딩)
+- [ ] 총자산 주기적 갱신 (현재 봇 시작 시 1회만 계산)
 
 ---
 

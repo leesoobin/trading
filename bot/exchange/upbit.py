@@ -88,6 +88,42 @@ class UpbitClient:
                 return float(acc["balance"])
         return 0.0
 
+    def get_total_balance_krw(self) -> dict:
+        """업비트 전체 자산 KRW 환산 (KRW잔고 + 보유코인 평가액)"""
+        accounts = self.get_accounts()
+        krw = 0.0
+        coin_symbols = []
+        coin_balances = {}
+
+        for acc in accounts:
+            if acc["currency"] == "KRW":
+                krw = float(acc["balance"])
+            else:
+                qty = float(acc["balance"]) + float(acc.get("locked", 0))
+                if qty > 0:
+                    symbol = f"KRW-{acc['currency']}"
+                    coin_symbols.append(symbol)
+                    coin_balances[symbol] = qty
+
+        coin_value = 0.0
+        if coin_symbols:
+            try:
+                tickers = self.get_ticker(coin_symbols)
+                for t in tickers:
+                    symbol = t["market"]
+                    price = float(t["trade_price"])
+                    qty = coin_balances.get(symbol, 0)
+                    coin_value += price * qty
+            except Exception as e:
+                logger.warning(f"코인 현재가 조회 실패, avg_buy_price 사용: {e}")
+                for acc in accounts:
+                    if acc["currency"] != "KRW":
+                        qty = float(acc["balance"]) + float(acc.get("locked", 0))
+                        avg = float(acc.get("avg_buy_price", 0))
+                        coin_value += qty * avg
+
+        return {"krw": krw, "coin_value": coin_value, "total": krw + coin_value}
+
     # ── 주문 ──────────────────────────────────────────────────────
     def place_market_buy(self, symbol: str, price: float) -> dict:
         self._throttle(0.2)
@@ -157,3 +193,56 @@ class UpbitClient:
                 except Exception as e:
                     logger.error(f"Upbit WebSocket error: {e}")
                     break
+
+    def get_daily_candles(self, symbol: str, count: int = 400) -> pd.DataFrame:
+        """
+        업비트 일봉 데이터 조회.
+        turtle/trend_following 등 일봉 기반 전략용.
+        """
+        import pyupbit
+        self._throttle()
+        try:
+            if count <= 200:
+                df = pyupbit.get_ohlcv(symbol, interval="day", count=count)
+            else:
+                frames = []
+                remaining = count
+                oldest_dt = None
+                while remaining > 0:
+                    batch = min(remaining, 200)
+                    if oldest_dt:
+                        chunk = pyupbit.get_ohlcv(symbol, interval="day", count=batch, to=oldest_dt)
+                    else:
+                        chunk = pyupbit.get_ohlcv(symbol, interval="day", count=batch)
+                    if chunk is None or len(chunk) == 0:
+                        break
+                    frames.append(chunk)
+                    oldest_dt = chunk.index[0].strftime("%Y-%m-%d")
+                    remaining -= len(chunk)
+                    if len(chunk) < batch:
+                        break
+                    import time
+                    time.sleep(0.15)
+                if not frames:
+                    return None
+                df = pd.concat(frames).sort_index().drop_duplicates()
+
+            if df is None or len(df) == 0:
+                return None
+
+            df = df.reset_index()
+            df.columns = [c.lower() for c in df.columns]
+            # pyupbit 반환 컬럼: index, open, high, low, close, volume, value
+            if df.columns[0] == "index":
+                df = df.rename(columns={"index": "datetime"})
+            else:
+                df = df.rename(columns={df.columns[0]: "datetime"})
+            df["datetime"] = pd.to_datetime(df["datetime"])
+            for col in ["open", "high", "low", "close", "volume"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["close"]).sort_values("datetime").reset_index(drop=True)
+            return df[["datetime", "open", "high", "low", "close", "volume"]]
+        except Exception as e:
+            logger.error(f"업비트 일봉 조회 실패 {symbol}: {e}")
+            return None
