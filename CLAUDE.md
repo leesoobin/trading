@@ -20,7 +20,7 @@
 |------|------|
 | `main.py` | 봇 진입점, STRATEGY_MAP, 전략 라우팅, 포지션 복원 |
 | `config.yaml` | API 키 + 전략 설정 (gitignore) |
-| `bot/screener.py` | 새벽 배치 스크리닝 엔진 (ScreenResult 반환) |
+| `bot/screener.py` | 배치 스크리닝 엔진 (일봉 기술점수, ScreenResult 반환) |
 | `bot/exchange/upbit.py` | Upbit REST + `get_total_balance_krw()` |
 | `bot/exchange/kis.py` | KIS OAuth2 + REST 클라이언트 (분봉 포함) |
 | `bot/scheduler.py` | APScheduler, 장 운영시간, 스크리닝 잡 |
@@ -34,36 +34,79 @@
 
 ---
 
-## 전략 파일 → STRATEGY_MAP
+## 활성 전략 (config.yaml 기준, 코인/국내/해외 공통)
 
 ```python
-# main.py STRATEGY_MAP (불량 전략 제거 완료)
-"turtle"              → bot/strategy/turtle.py           ✅ 우수
-"trend_following"     → bot/strategy/trend_following.py  ✅ 우수
-"bollinger_breakout"  → bot/strategy/bollinger_breakout.py ✅ 양호
-"ma_pullback"         → bot/strategy/ma_pullback.py      ⚠️ 보류
-"mtf_structure"       → bot/strategy/mtf_structure.py    🆕 신규 실거래 검증 중
+# 현재 활성 (3개 시장 모두 동일)
+"turtle"          → bot/strategy/turtle.py          ✅ 활성
+"trend_following" → bot/strategy/trend_following.py ✅ 활성
 
-# 제거됨 (성과 불량)
+# 비활성 (config에서 제거됨)
+"bollinger_breakout" ⏸ 코인 실거래 손실로 비활성
+"mtf_structure"      ⏸ 거래수 부족, 검증 미완
+"ma_pullback"        ⏸ 승률 33.3% 불량
+
+# 제거됨 (영구)
 # smc, smc_ob_pullback, smc_liquidity_sweep, smc_range, smc_golden_ob, rsi_reversal
 ```
 
-### 전략별 손절/익절/최대보유기간
+### 활성 전략 진입/청산 조건
 
-| 전략 | 손절 | 익절/청산 | 최대 보유 |
-|------|------|----------|----------|
-| **MTFStructureStrategy** | LTF 스윙 저점 | HTF 스윙 고점 (전략 계산) | **3일** |
-| **BollingerBreakoutStrategy** | -3% 안전망 | 볼린저 중심선(MA20) 도달 | **3일** |
-| **TrendFollowingStrategy** | -3% 안전망 | MA20 < MA200 데드크로스 | **14일** |
-| **MAPullbackStrategy** | -3% 안전망 | EMA 역배열 | **14일** |
-| **TurtleStrategy** | -3% 안전망 | 10일/20일 최저가 이탈 | **제한 없음** |
+| 전략 | 사용 봉 | 진입 | 청산 | 최대 보유 |
+|------|---------|------|------|----------|
+| **TurtleStrategy** (System2) | **일봉** | 55일 도니안 상단 돌파 | 20일 최저가 이탈 / 2ATR 손절 | **없음** |
+| **TrendFollowingStrategy** | **일봉** | MA20/MA200 골든크로스 또는 52주 신고가+정배열 | MA20 < MA200 데드크로스 | **14일** |
 
 → `main.py`의 `MAX_HOLD_DAYS` 딕셔너리에서 관리
-→ `pos.take_profit_price > 0`이면 MTF (고정 TP), `== 0`이면 전략 신호로만 청산
+→ `pos.take_profit_price == 0`이면 전략 신호로만 청산 (터틀/추세추종 모두 해당)
 
 ---
 
-## 시장별 MTF 타임프레임 매핑
+## 스크리닝 구조
+
+### 실행 시간 및 데이터
+
+| 시각 (KST) | 대상 | 유니버스 | 필터 데이터 | 결과 |
+|-----------|------|---------|-----------|------|
+| **00:30** (매일) | 업비트 코인 | 24h 거래대금 상위 40개 | **4H봉 100개** (~16일치) | 최대 30개 |
+| **06:00** (월~토) | 미국 NASDAQ | 고정 100종목 (US_UNIVERSE) | **일봉 200개** (~10개월치) | 상위 N개 |
+| **15:00** (월~금) | KOSPI+KOSDAQ | 거래량 순위 각 100개 | **일봉 60개** (~3개월치) | 상위 N개 |
+
+- 공통 필터: `_tech_score >= 3` (EMA정배열 +3, 거래량급증 +2, 52주고가 +2, BB수축 +2, 눌림목 +1)
+- 장외 시간 국내 스크리닝 호출 시 자동 스킵 (15:00 정기 실행으로 대체)
+- 모든 cron 잡 `misfire_grace_time=300` (이벤트 루프 지연 5분 이내 실행 보장)
+- `ScreenResult.market_type`: KOSPI/KOSDAQ/NAS 구분 (main.py 분봉 결정용)
+
+---
+
+## 트레이딩 데이터 수집 (매 60초)
+
+### 업비트
+
+```python
+df_htf   = upbit.get_candles(symbol, "240", count=100)   # 4H봉 100개 (~16일)  [MTF용, 현재 미사용]
+df_ltf   = upbit.get_candles(symbol, "15",  count=200)   # 15분봉 200개 (~50h) [Bollinger용, 현재 미사용]
+df_daily = upbit.get_daily_candles(symbol, count=400)    # 일봉 400개 (~1.6년)  [turtle/trend 사용]
+```
+
+### 국내 주식 (KIS)
+
+```python
+df_daily = kis.get_domestic_daily_chart(symbol, count=300)           # 일봉 300개 (~1.2년)  [turtle/trend 사용]
+df_ltf   = kis.get_domestic_minute_chart(symbol, period=60, count=120) # 60분봉(KOSPI) 120개 [MTF용, 현재 미사용]
+          # kis.get_domestic_minute_chart(symbol, period=30, count=120) # 30분봉(KOSDAQ)
+```
+
+### 해외 주식 (KIS)
+
+```python
+df_daily = kis.get_overseas_daily_chart(symbol, market="NAS", count=300) # 일봉 300개 (~1.2년) [turtle/trend 사용]
+df_ltf   = kis.get_overseas_minute_chart(symbol, nmin=15, count=100)     # 15분봉 100개 (~25h) [MTF용, 현재 미사용]
+```
+
+---
+
+## 시장별 MTF 타임프레임 매핑 (비활성이지만 코드 구조 유지)
 
 | 시장 | HTF (추세 파악) | LTF (진입 시점) | 거래소 |
 |------|----------------|----------------|--------|
@@ -80,11 +123,11 @@
 
 | 전략 | 봉 | 승률 | 총손익 | 상태 |
 |------|-----|------|--------|------|
-| turtle | 일봉 | 55.3% | +348,965원 | ✅ 우수 |
-| trend_following | 일봉 | 56.2% | +330,841원 | ✅ 우수 |
-| bollinger_breakout | 1H | 55.8% | +187,542원 | ✅ 양호 |
-| ma_pullback | 일봉 | 33.3% | -519원 | ⚠️ 보류 |
-| mtf_structure | 15분 LTF | 40.0% | -6,946원 | ⚠️ 거래수 부족 |
+| turtle | 일봉 | 55.3% | +348,965원 | ✅ 활성 |
+| trend_following | 일봉 | 56.2% | +330,841원 | ✅ 활성 |
+| bollinger_breakout | 15분봉 | 55.8% | +187,542원 | ⏸ 비활성 (코인 손실) |
+| ma_pullback | 일봉 | 33.3% | -519원 | ⏸ 비활성 |
+| mtf_structure | 15분 LTF | 40.0% | -6,946원 | ⏸ 비활성 |
 | smc 계열 5종 | — | — | 손실 | ❌ 제거 |
 
 ---
@@ -113,14 +156,6 @@
 ### 가격 포맷
 - 텔레그램: `_format_krw()` — 1,000원 이상 천단위 쉼표, 소수 최대 8자리
 - 대시보드 JS: `fmt()` — K/M 없이 소수점 완전 표시
-
-### 스크리닝 구조
-```
-00:30 KST → 업비트 (거래대금 상위 40 → 4H HTF → 최대 30개)
-06:00 KST → 미국 (NASDAQ 100종목, 월~토)
-16:30 KST → 국내 (KOSPI+KOSDAQ 상위 200, 월~금)
-```
-- `ScreenResult.market_type`: KOSPI/KOSDAQ/NAS 구분
 
 ---
 
@@ -159,5 +194,8 @@ df_daily = upbit.get_daily_candles(symbol, count=400)
 - [ ] KIS 잔고 API 연동 (현재 100만원 하드코딩)
 - [ ] 총자산 주기적 갱신 (현재 봇 시작 시 1회)
 - [ ] 스크리닝 결과 대시보드 표시
-- [ ] mtf_structure 거래수 확대 검증
-- [x] 최대 보유 기간 강제 청산 (볼린저/MTF 3일, 추세추종 14일)
+- [ ] bollinger_breakout / mtf_structure 재검증 후 재활성화 검토
+- [x] 최대 보유 기간 강제 청산 (추세추종 14일, 터틀 제외)
+- [x] misfire_grace_time=300 (스크리닝 cron 잡 누락 방지)
+- [x] 국내 스크리닝 장외 시간 자동 스킵 + 15:00으로 변경
+- [x] 해외 스크리닝 일봉 count=200 (EMA60 워밍업 개선)

@@ -108,27 +108,32 @@ class BotScheduler:
         """새벽 배치 스크리닝 스케줄 등록
         - 00:30 KST: 업비트 코인 스크리닝
         - 06:00 KST: 미국장 마감 후 해외 스크리닝
-        - 16:30 KST: 한국장 마감 후 국내 스크리닝
+        - 15:00 KST: 한국 장중 국내 스크리닝 (거래량 순위 API 장중 전용)
+
+        misfire_grace_time=300: 이벤트 루프가 잠깐 바빠도 5분 이내면 실행
         """
         self._scheduler.add_job(
             screen_upbit,
             trigger=CronTrigger(hour=0, minute=30, timezone=KST),
             id="screen_upbit",
             replace_existing=True,
+            misfire_grace_time=300,
         )
         self._scheduler.add_job(
             screen_us,
             trigger=CronTrigger(hour=6, minute=0, day_of_week="mon-sat", timezone=KST),
             id="screen_us",
             replace_existing=True,
+            misfire_grace_time=300,
         )
         self._scheduler.add_job(
             screen_kr,
-            trigger=CronTrigger(hour=16, minute=30, day_of_week="mon-fri", timezone=KST),
+            trigger=CronTrigger(hour=15, minute=0, day_of_week="mon-fri", timezone=KST),
             id="screen_kr",
             replace_existing=True,
+            misfire_grace_time=300,
         )
-        logger.info("스크리닝 스케줄 등록: 00:30(업비트) / 06:00(미국) / 16:30(국내)")
+        logger.info("스크리닝 스케줄 등록: 00:30(업비트) / 06:00(미국) / 15:00(국내 장중)")
 
     def start(self):
         self._scheduler.start()

@@ -5,14 +5,18 @@
 타임라인:
   00:30 KST → screen_upbit()          업비트 코인
   06:00 KST → screen_kis_overseas()   미국장 마감 후
-  16:30 KST → screen_kis_domestic()   한국장 마감 후
+  15:00 KST → screen_kis_domestic()   한국 장중 (거래량 순위 API 장중 전용)
 """
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import pandas as pd
+import pytz
 import requests
+
+_KST = pytz.timezone("Asia/Seoul")
 
 logger = logging.getLogger(__name__)
 
@@ -232,11 +236,21 @@ class Screener:
     async def screen_kis_domestic(self) -> list[ScreenResult]:
         """
         KIS 국내 주식 스크리닝
-        1순위: KOSPI+KOSDAQ 거래량 순위 상위 100개씩
+        1순위: KOSPI+KOSDAQ 거래량 순위 상위 100개씩 (장중 09:00~15:20만 동작)
         2순위: 일봉 60일치 기술적 점수 3점 이상 → top_n_domestic 반환 (ScreenResult 리스트)
 
         ScreenResult.market_type: "KOSPI" or "KOSDAQ" (main.py 분봉 타임프레임 결정용)
         """
+        # 거래량 순위 API는 장중(09:00~15:20)에만 동작 — 장외 시간엔 스킵
+        now = datetime.now(_KST)
+        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=20, second=0, microsecond=0)
+        if not (market_open <= now <= market_close):
+            logger.info(
+                f"[스크리너] KIS 국내 장외 시간({now.strftime('%H:%M')}) — 스크리닝 스킵 (장중 15:00에 실행됨)"
+            )
+            return []
+
         logger.info("[스크리너] KIS 국내 스크리닝 시작")
         try:
             # KOSPI + KOSDAQ 거래량 순위 (market_type 정보 유지)
@@ -315,13 +329,15 @@ class Screener:
         미국 주식 스크리닝 (US_UNIVERSE → KIS 일봉 필터)
         최대 top_n_overseas개 반환 (기본 100개)
         ScreenResult.market_type: market 값 (NAS 등)
+
+        count=200: EMA60 워밍업 + 52주 신고가(~9개월) 제대로 계산
         """
         logger.info(f"[스크리너] KIS 해외({market}) 스크리닝 시작")
         try:
             results = []
             for symbol in US_UNIVERSE:
                 try:
-                    raw = self.kis.get_overseas_daily_chart(symbol, market=market, count=60)
+                    raw = self.kis.get_overseas_daily_chart(symbol, market=market, count=200)
                     if not raw or len(raw) < 20:
                         await asyncio.sleep(0.6)
                         continue
