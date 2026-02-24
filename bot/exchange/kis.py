@@ -157,16 +157,22 @@ class KISClient:
         return resp.json().get("output", {})
 
     def get_overseas_daily_chart(self, symbol: str, market: str = "NAS", count: int = 200) -> list[dict]:
-        """해외 일봉 조회"""
+        """해외 일봉 조회
+        
+        BYMD: KST 기준이 아닌 미국 동부 시간 기준 날짜 사용
+        KST는 미국 동부보다 14시간 앞서므로, datetime.now() - 14h 로 미국 날짜 계산
+        (예: 02:05 KST Feb 25 → 12:05 Feb 24 US → BYMD=20260224)
+        """
         self._ensure_token()
         url = f"{self.base_url}/uapi/overseas-price/v1/quotations/dailychartprice"
-        today = datetime.now().strftime("%Y%m%d")
+        from datetime import timedelta
+        us_date = (datetime.now() - timedelta(hours=14)).strftime("%Y%m%d")
         params = {
             "AUTH": "",
             "EXCD": market,
             "SYMB": symbol,
             "GUBN": "0",
-            "BYMD": today,
+            "BYMD": us_date,
             "MODP": "1",
         }
         resp = requests.get(url, headers=self._headers("HHDFS76240000"), params=params, timeout=10)
@@ -178,19 +184,28 @@ class KISClient:
         """
         해외 주식 주문
         side: 'buy' | 'sell'
+        market: 'NAS'/'NASD'(NASDAQ), 'NYS'/'NYSE', 'AMS'/'AMEX' 등
+                조회용(NAS) → 주문용(NASD) 자동 변환
+        price: 0이면 시장가, > 0이면 지정가 (소수점 2자리 자동 반올림)
         """
+        self._ensure_token()
+        # 조회용 코드 → 주문용 코드 매핑
+        _ORDER_MARKET_MAP = {"NAS": "NASD", "NYS": "NYSE", "AMS": "AMEX", "HKS": "SEHK"}
+        order_market = _ORDER_MARKET_MAP.get(market, market)
         if side == "buy":
             tr_id = "TTTT1002U" if not self.is_paper else "VTTT1002U"
         else:
             tr_id = "TTTT1006U" if not self.is_paper else "VTTT1001U"
+        # KIS 해외주식: 1$ 이상은 소수점 2자리까지만 허용
+        formatted_price = f"{round(price, 2):.2f}" if price > 0 else "0"
         body = {
             "CANO": self.account_no,
             "ACNT_PRDT_CD": self.account_product_code,
-            "OVRS_EXCG_CD": market,
+            "OVRS_EXCG_CD": order_market,
             "PDNO": symbol,
             "ORD_DVSN": "00" if price > 0 else "01",
             "ORD_QTY": str(qty),
-            "OVRS_ORD_UNPR": str(price),
+            "OVRS_ORD_UNPR": formatted_price,
             "ORD_SVR_DVSN_CD": "0",
         }
         hashkey = self._get_hashkey(body)
