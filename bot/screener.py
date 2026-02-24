@@ -25,7 +25,7 @@ US_UNIVERSE = [
     # ── 반도체/하드웨어 ──────────────────────────────────────────
     "NVDA", "AMD", "INTC", "AVGO", "QCOM", "AMAT", "KLAC", "LRCX", "MU", "NXPI",
     "MRVL", "ON", "MPWR", "SMCI", "ARM", "SWKS", "QRVO", "TXN", "SNPS", "CDNS",
-    "ANSS", "KEYS", "WOLF", "COHU", "ACLS",
+    "KEYS", "WOLF", "COHU", "ACLS", "MCHP",
     # ── 빅테크/소프트웨어 ────────────────────────────────────────
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "ORCL", "ADBE", "CRM", "NOW", "INTU",
     "WDAY", "TEAM", "SNOW", "DDOG", "ZS", "CRWD", "PANW", "FTNT", "S", "NET",
@@ -36,7 +36,7 @@ US_UNIVERSE = [
     "TSLA", "NFLX", "SPOT", "SHOP", "UBER", "LYFT", "ABNB", "DASH", "PINS", "SNAP",
     "ROKU", "TTD", "RBLX", "U", "MELI",
     # ── 핀테크/금융 (NASDAQ 중심) ───────────────────────────────
-    "PYPL", "SQ", "AFRM", "SOFI", "UPST", "COIN", "HOOD", "NU", "IBKR", "SCHW",
+    "PYPL", "AFRM", "SOFI", "UPST", "COIN", "HOOD", "NU", "IBKR", "SCHW", "V",
     # ── 바이오/헬스케어 (NASDAQ 중심) ───────────────────────────
     "MRNA", "BNTX", "GILD", "VRTX", "BIIB", "REGN", "AMGN", "ALNY", "RXRX", "NVAX",
     # ── 클린에너지/EV ───────────────────────────────────────────
@@ -326,30 +326,44 @@ class Screener:
     # ── KIS 해외 스크리닝 ─────────────────────────────────────────
     async def screen_kis_overseas(self, market: str = "NAS") -> list[ScreenResult]:
         """
-        미국 주식 스크리닝 (US_UNIVERSE → KIS 일봉 필터)
-        최대 top_n_overseas개 반환 (기본 100개)
-        ScreenResult.market_type: market 값 (NAS 등)
+        미국 주식 스크리닝 (yfinance 일봉 — KIS HHDFS76240000 대체)
 
-        count=200: EMA60 워밍업 + 52주 신고가(~9개월) 제대로 계산
+        KIS 해외 일봉 API(HHDFS76240000)는 계좌 권한 문제로 404 반환
+        → yfinance 배치 다운로드로 대체 (US_UNIVERSE 전체를 한번에)
+
+        1년치 일봉 → 기술적 점수 3점 이상 → top_n_overseas 반환
         """
-        logger.info(f"[스크리너] KIS 해외({market}) 스크리닝 시작")
+        import yfinance as yf
+
+        logger.info(f"[스크리너] 해외({market}) 스크리닝 시작 (yfinance)")
         try:
+            loop = asyncio.get_event_loop()
+
+            def _batch_download():
+                return yf.download(
+                    US_UNIVERSE,
+                    period="1y",
+                    interval="1d",
+                    group_by="ticker",
+                    progress=False,
+                    auto_adjust=True,
+                    threads=True,
+                )
+
+            hist = await loop.run_in_executor(None, _batch_download)
+
             results = []
             for symbol in US_UNIVERSE:
                 try:
-                    raw = self.kis.get_overseas_daily_chart(symbol, market=market, count=200)
-                    if not raw or len(raw) < 20:
-                        await asyncio.sleep(0.6)
+                    # MultiIndex: hist[symbol] 로 접근
+                    df_raw = hist[symbol] if isinstance(hist.columns, pd.MultiIndex) else hist
+                    df_raw = df_raw.dropna(subset=["Close"])
+                    if df_raw is None or len(df_raw) < 20:
                         continue
 
-                    df = pd.DataFrame(raw)
-                    df = df.rename(columns={
-                        "xymd": "datetime", "open": "open", "high": "high",
-                        "low": "low", "clos": "close", "tvol": "volume",
-                    })
-                    for col in ["open", "high", "low", "close", "volume"]:
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                    df = df.dropna(subset=["close"]).sort_values("datetime").reset_index(drop=True)
+                    df = df_raw[["Open", "High", "Low", "Close", "Volume"]].copy()
+                    df.columns = ["open", "high", "low", "close", "volume"]
+                    df = df.reset_index(drop=True)
 
                     score, trend, reasons = self._tech_score(df)
                     if score >= 3:
@@ -359,16 +373,16 @@ class Screener:
                             market_type=market,
                             reasons=reasons,
                         ))
-                    await asyncio.sleep(0.6)
                 except Exception as e:
-                    logger.debug(f"KIS 해외 {symbol} 분석 오류: {e}")
-                    await asyncio.sleep(0.6)
+                    logger.debug(f"yfinance {symbol} 분석 오류: {e}")
 
             results.sort(key=lambda x: x.score, reverse=True)
             selected = results[:self.top_n_overseas]
-            logger.info(f"[스크리너] KIS 해외 완료: {len(selected)}개 선별 → {[r.symbol for r in selected]}")
+            logger.info(
+                f"[스크리너] 해외 완료: {len(selected)}개 선별 → {[r.symbol for r in selected]}"
+            )
             return selected
 
         except Exception as e:
-            logger.error(f"[스크리너] KIS 해외 스크리닝 실패: {e}")
+            logger.error(f"[스크리너] 해외 스크리닝 실패: {e}")
             return []
