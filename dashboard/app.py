@@ -24,6 +24,13 @@ _bot_context: Optional[dict] = None
 _ws_clients: list[WebSocket] = []
 _bot_running: bool = True
 
+# 대시보드 전용 스토리지 (봇 미실행 시에도 캐시 사용 가능)
+try:
+    from bot.storage import Storage as _Storage
+    _storage = _Storage()
+except Exception:
+    _storage = None
+
 
 # ── 목업 데이터 (봇 미실행 시 사용) ─────────────────────────────────
 def _mock_pnl_chart() -> list[dict]:
@@ -444,22 +451,32 @@ async def _fetch_ohlcv(symbol: str, market: str, interval: str):
 
 def _resolve_domestic_symbol(query: str) -> str:
     """국내 주식 종목명 → 코드 변환 (숫자면 그대로 반환)
-    스크리너 캐시(domestic_candidates.json) 우선 사용 → 네이버 API 폴백
+    우선순위: DB symbol_info → 스크리너 캐시 JSON → 네이버 자동완성 API
     """
     if query.isdigit():
         return query
-    # 1순위: 스크리너 캐시 (주말/야간에도 동작)
+
+    # 1순위: DB symbol_info (스크리닝 누적 데이터)
+    if _storage:
+        try:
+            code = _storage.get_symbol_by_name(query, "domestic")
+            if code:
+                return code
+        except Exception:
+            pass
+
+    # 2순위: 스크리너 캐시 JSON
     try:
-        import json
-        from pathlib import Path
+        import json as _json
         cache_path = Path(__file__).parent.parent / "data" / "domestic_candidates.json"
         if cache_path.exists():
-            for code, market, name in json.loads(cache_path.read_text()):
+            for code, market, name in _json.loads(cache_path.read_text()):
                 if name == query:
                     return code
     except Exception:
         pass
-    # 2순위: 네이버 금융 자동완성 API
+
+    # 3순위: 네이버 금융 자동완성 API
     try:
         import requests as _req
         resp = _req.get(
@@ -478,12 +495,15 @@ def _resolve_domestic_symbol(query: str) -> str:
             return candidates[0][0]
     except Exception:
         pass
+
     return query  # 변환 실패 시 원본 반환
 
 
 @app.get("/api/analyze")
 async def analyze_symbol(symbol: str, market: str = "overseas", interval: str = "1d"):
-    """종목 분석: 전략 시그널 + 기술점수 + 매매 추천"""
+    """종목 분석: 전략 시그널 + 기술점수 + 매매 추천
+    분석 결과는 DB에 캐싱됨 (일봉 1시간, 분봉 15분)
+    """
     try:
         from bot.screener import Screener
 
@@ -493,9 +513,40 @@ async def analyze_symbol(symbol: str, market: str = "overseas", interval: str = 
                 return {"symbol": symbol, "error": f"종목명 '{symbol}'을 찾을 수 없습니다. 코드(예: 005930)로 직접 입력해주세요."}
             symbol = resolved
 
+        # ── 분석 캐시 확인 ────────────────────────────────────────
+        if _storage:
+            max_age = 1.0 if interval == "1d" else 0.25  # 일봉 1시간, 분봉 15분
+            cached = await asyncio.to_thread(
+                _storage.get_analysis_cache, symbol, market, interval, max_age
+            )
+            if cached:
+                # 거래 이력은 항상 실시간 조회
+                if _bot_context:
+                    storage = _bot_context.get("storage")
+                    if storage:
+                        try:
+                            raw = storage.get_trades_by_symbol(symbol)
+                            cached["trades"] = [
+                                {"date": t["timestamp"][:10], "side": t["side"],
+                                 "strategy": t["strategy"], "price": t["price"],
+                                 "reason": t.get("reason", "")}
+                                for t in raw
+                            ]
+                        except Exception:
+                            pass
+                cached["_cached"] = True
+                return cached
+
         df = await _fetch_ohlcv(symbol, market, interval)
         if df is None or len(df) < 20:
             return {"symbol": symbol, "error": f"데이터 부족 (20봉 미만) — 종목코드가 맞는지 확인해주세요."}
+
+        # OHLCV DB 저장 (다음 분석 재사용용)
+        if _storage:
+            try:
+                await asyncio.to_thread(_storage.upsert_ohlcv, symbol, market, interval, df)
+            except Exception:
+                pass
 
         current_price = float(df["close"].iloc[-1])
         tech_score, trend, reasons = Screener._tech_score(df)
@@ -554,7 +605,7 @@ async def analyze_symbol(symbol: str, market: str = "overseas", interval: str = 
 
         signal_markers = _calc_signal_markers(df)
 
-        return {
+        result = {
             "symbol": symbol,
             "current_price": current_price,
             "tech_score": tech_score,
@@ -567,6 +618,16 @@ async def analyze_symbol(symbol: str, market: str = "overseas", interval: str = 
             "signal_markers": signal_markers,
             "error": None,
         }
+
+        # 분석 결과 캐시 저장 (trades 제외 — 실시간 조회 필요)
+        if _storage:
+            try:
+                cache_data = {k: v for k, v in result.items() if k != "trades"}
+                await asyncio.to_thread(_storage.set_analysis_cache, symbol, market, interval, cache_data)
+            except Exception:
+                pass
+
+        return result
     except Exception as e:
         logger.error(f"[분석] {symbol} 오류: {e}")
         return {"symbol": symbol, "error": str(e)}

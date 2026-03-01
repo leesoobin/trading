@@ -176,101 +176,139 @@ class MTFStructureStrategy(Strategy):
             return self._detect_bearish_entry(df_ltf, swing_highs, swing_lows, htf_low)
 
     def _detect_bullish_entry(self, df_ltf: pd.DataFrame,
-                           swing_highs: list, swing_lows: list,
-                           htf_high: float) -> tuple[Signal, str]:
+                              swing_highs: list, swing_lows: list,
+                              htf_high: float) -> tuple[Signal, str]:
         """
-        HTF Bullish: 조정 후 LTF ChoCh/BOS 상향 돌파 → BUY
+        HTF Bullish: LTF 눌림목에서 해머 캔들 또는 거래량 급증 → BUY
 
-        조정 감지 (스윙 기반): 최근 swing_low가 이전보다 낮음
-        TP 최소 거리: 1%
+        진입 조건:
+          1. LTF 가격이 EMA20 아래 (눌림목 확인)
+          2. 해머 캔들 (아래꼬리 ≥ 1.5× 몸통, 위꼬리 ≤ 0.5× 몸통, 양봉)
+             또는 거래량 급증 (1.5× 20봉 평균) + 양봉
+          3. TP = HTF 고점, SL = 해머 저점 (tight)
+          4. RR ≥ 1.5
         """
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            return Signal.HOLD, "LTF 스윙 포인트 부족"
+        if len(df_ltf) < 22:
+            return Signal.HOLD, "LTF 데이터 부족"
 
-        close = df_ltf["close"].values
-        current_close = float(close[-1])
+        last = df_ltf.iloc[-1]
+        current_close = float(last["close"])
+        full_range = float(last["high"]) - float(last["low"])
 
-        recent_lows = swing_lows[-3:] if len(swing_lows) >= 3 else swing_lows
-        recent_highs = swing_highs[-3:] if len(swing_highs) >= 3 else swing_highs
+        if full_range <= 0:
+            return Signal.HOLD, "봉 범위 0"
 
-        # 조정 감지: 스윙 기반 (최근 저점이 이전보다 낮음)
-        correction_detected = (len(recent_lows) >= 2 and
-                               recent_lows[-1][1] < recent_lows[-2][1])
+        body = abs(float(last["close"]) - float(last["open"]))
+        lower_shadow = min(float(last["open"]), float(last["close"])) - float(last["low"])
+        upper_shadow = float(last["high"]) - max(float(last["open"]), float(last["close"]))
+        is_bullish_candle = float(last["close"]) > float(last["open"])
 
-        if not correction_detected:
-            return Signal.HOLD, "조정 구간 미감지"
+        # 해머 캔들: 양봉 + 아래꼬리 ≥ 1.5× 몸통 + 위꼬리 ≤ 0.5× 몸통
+        is_hammer = (
+            is_bullish_candle and
+            body > 0 and
+            lower_shadow >= 1.5 * body and
+            upper_shadow <= 0.5 * body
+        )
 
-        if not recent_highs:
-            return Signal.HOLD, "LTF 고점 없음"
+        # 거래량 급증 (양봉 + 1.5× 평균거래량)
+        avg_vol = float(df_ltf["volume"].iloc[-21:-1].mean())
+        curr_vol = float(df_ltf["volume"].iloc[-1])
+        vol_surge = is_bullish_candle and avg_vol > 0 and curr_vol > avg_vol * 1.5
 
-        last_swing_high = recent_highs[-1][1]
+        # 눌림목 확인: 최근 3봉 종가 평균이 EMA20 아래
+        ema20 = df_ltf["close"].ewm(span=20, adjust=False).mean()
+        recent_avg = float(df_ltf["close"].iloc[-4:-1].mean())
+        ema20_val = float(ema20.iloc[-1])
+        in_pullback = recent_avg < ema20_val
 
-        # ChoCh: 조정 중 직전 LTF 고점을 상향 돌파
-        if current_close > last_swing_high:
-            sl_price = recent_lows[-1][1] if recent_lows else current_close * 0.97
-            tp_price = htf_high
-            if tp_price > current_close * 1.01 and sl_price < current_close:
-                rr = (tp_price - current_close) / (current_close - sl_price)
-                self._last_sl, self._last_tp = sl_price, tp_price
-                return Signal.BUY, f"LTF ChoCh BUY @ {current_close:.2f} SL={sl_price:.2f} TP={tp_price:.2f} RR={rr:.1f}"
+        if not in_pullback:
+            return Signal.HOLD, "눌림목 미확인 (EMA20 위)"
 
-        # BOS: 새로운 LTF 고점 형성 (이전 고점 경신)
-        if len(swing_highs) >= 2 and swing_highs[-1][1] > swing_highs[-2][1]:
-            sl_price = swing_lows[-1][1] if swing_lows else current_close * 0.97
-            tp_price = htf_high
-            if tp_price > current_close * 1.01 and sl_price < current_close:
-                rr = (tp_price - current_close) / (current_close - sl_price)
-                self._last_sl, self._last_tp = sl_price, tp_price
-                return Signal.BUY, f"LTF BOS BUY @ {current_close:.2f} SL={sl_price:.2f} TP={tp_price:.2f} RR={rr:.1f}"
+        if not (is_hammer or vol_surge):
+            return Signal.HOLD, "반전 신호 없음 (해머/거래량 미충족)"
 
-        return Signal.HOLD, "LTF 진입 조건 미충족(bullish)"
+        sl_price = float(last["low"])  # 해머 저점 = 손절가 (tight)
+        tp_price = htf_high
+
+        if sl_price >= current_close:
+            return Signal.HOLD, "SL >= 현재가 (유효하지 않은 해머)"
+        if tp_price <= current_close * 1.005:
+            return Signal.HOLD, "TP 목표 너무 가까움"
+
+        rr = (tp_price - current_close) / (current_close - sl_price)
+        if rr < 1.5:
+            return Signal.HOLD, f"RR 부족 ({rr:.1f} < 1.5)"
+
+        self._last_sl, self._last_tp = sl_price, tp_price
+        signal_type = "해머캔들" if is_hammer else "거래량급증"
+        return Signal.BUY, f"LTF {signal_type} 눌림목 진입 @ {current_close:.2f} SL={sl_price:.2f} TP={tp_price:.2f} RR={rr:.1f}"
 
     def _detect_bearish_entry(self, df_ltf: pd.DataFrame,
                            swing_highs: list, swing_lows: list,
                            htf_low: float) -> tuple[Signal, str]:
         """
-        HTF Bearish: 반등 후 LTF ChoCh/BOS 하향 돌파 → SELL
+        HTF Bearish: LTF 반등에서 슈팅스타 캔들 또는 거래량 급증(음봉) → SELL
 
-        반등 감지 (스윙 기반): 최근 swing_high가 이전보다 높음
-        TP 최소 거리: 1%
+        진입 조건:
+          1. LTF 가격이 EMA20 위 (반등 확인)
+          2. 슈팅스타 (위꼬리 ≥ 1.5× 몸통, 아래꼬리 ≤ 0.5× 몸통, 음봉)
+             또는 거래량 급증 (1.5× 20봉 평균) + 음봉
+          3. TP = HTF 저점, SL = 슈팅스타 고점 (tight)
+          4. RR ≥ 1.5
         """
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            return Signal.HOLD, "LTF 스윙 포인트 부족"
+        if len(df_ltf) < 22:
+            return Signal.HOLD, "LTF 데이터 부족"
 
-        close = df_ltf["close"].values
-        current_close = float(close[-1])
+        last = df_ltf.iloc[-1]
+        current_close = float(last["close"])
+        full_range = float(last["high"]) - float(last["low"])
 
-        recent_highs = swing_highs[-3:] if len(swing_highs) >= 3 else swing_highs
-        recent_lows = swing_lows[-3:] if len(swing_lows) >= 3 else swing_lows
+        if full_range <= 0:
+            return Signal.HOLD, "봉 범위 0"
 
-        # 반등 감지: 스윙 기반 (최근 고점이 이전보다 높음)
-        bounce_detected = (len(recent_highs) >= 2 and
-                           recent_highs[-1][1] > recent_highs[-2][1])
+        body = abs(float(last["close"]) - float(last["open"]))
+        lower_shadow = min(float(last["open"]), float(last["close"])) - float(last["low"])
+        upper_shadow = float(last["high"]) - max(float(last["open"]), float(last["close"]))
+        is_bearish_candle = float(last["close"]) < float(last["open"])
 
-        if not bounce_detected:
-            return Signal.HOLD, "반등 구간 미감지"
+        # 슈팅스타: 음봉 + 위꼬리 ≥ 1.5× 몸통 + 아래꼬리 ≤ 0.5× 몸통
+        is_shooting_star = (
+            is_bearish_candle and
+            body > 0 and
+            upper_shadow >= 1.5 * body and
+            lower_shadow <= 0.5 * body
+        )
 
-        if not recent_lows:
-            return Signal.HOLD, "LTF 저점 없음"
+        # 거래량 급증 (음봉 + 1.5× 평균거래량)
+        avg_vol = float(df_ltf["volume"].iloc[-21:-1].mean())
+        curr_vol = float(df_ltf["volume"].iloc[-1])
+        vol_surge = is_bearish_candle and avg_vol > 0 and curr_vol > avg_vol * 1.5
 
-        last_swing_low = recent_lows[-1][1]
+        # 반등 확인: 최근 3봉 종가 평균이 EMA20 위
+        ema20 = df_ltf["close"].ewm(span=20, adjust=False).mean()
+        recent_avg = float(df_ltf["close"].iloc[-4:-1].mean())
+        ema20_val = float(ema20.iloc[-1])
+        in_bounce = recent_avg > ema20_val
 
-        # ChoCh: 반등 중 직전 LTF 저점을 하향 돌파
-        if current_close < last_swing_low:
-            sl_price = recent_highs[-1][1] if recent_highs else current_close * 1.03
-            tp_price = htf_low
-            if tp_price < current_close * 0.99 and sl_price > current_close:
-                rr = (current_close - tp_price) / (sl_price - current_close)
-                self._last_sl, self._last_tp = sl_price, tp_price
-                return Signal.SELL, f"LTF ChoCh SELL @ {current_close:.2f} SL={sl_price:.2f} TP={tp_price:.2f} RR={rr:.1f}"
+        if not in_bounce:
+            return Signal.HOLD, "반등 미확인 (EMA20 아래)"
 
-        # BOS: 새로운 LTF 저점 형성
-        if len(swing_lows) >= 2 and swing_lows[-1][1] < swing_lows[-2][1]:
-            sl_price = swing_highs[-1][1] if swing_highs else current_close * 1.03
-            tp_price = htf_low
-            if tp_price < current_close * 0.99 and sl_price > current_close:
-                rr = (current_close - tp_price) / (sl_price - current_close)
-                self._last_sl, self._last_tp = sl_price, tp_price
-                return Signal.SELL, f"LTF BOS SELL @ {current_close:.2f} SL={sl_price:.2f} TP={tp_price:.2f} RR={rr:.1f}"
+        if not (is_shooting_star or vol_surge):
+            return Signal.HOLD, "반전 신호 없음 (슈팅스타/거래량 미충족)"
 
-        return Signal.HOLD, "LTF 진입 조건 미충족(bearish)"
+        sl_price = float(last["high"])  # 슈팅스타 고점 = 손절가 (tight)
+        tp_price = htf_low
+
+        if sl_price <= current_close:
+            return Signal.HOLD, "SL <= 현재가 (유효하지 않은 슈팅스타)"
+        if tp_price >= current_close * 0.995:
+            return Signal.HOLD, "TP 목표 너무 가까움"
+
+        rr = (current_close - tp_price) / (sl_price - current_close)
+        if rr < 1.5:
+            return Signal.HOLD, f"RR 부족 ({rr:.1f} < 1.5)"
+
+        self._last_sl, self._last_tp = sl_price, tp_price
+        signal_type = "슈팅스타" if is_shooting_star else "거래량급증(음봉)"
+        return Signal.SELL, f"LTF {signal_type} 반등 진입 @ {current_close:.2f} SL={sl_price:.2f} TP={tp_price:.2f} RR={rr:.1f}"

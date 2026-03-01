@@ -104,16 +104,57 @@ class TelegramNotifier:
         upbit_pnl = summary.get("upbit_pnl", 0)
         kis_dom_pnl = summary.get("kis_domestic_pnl", 0)
         kis_ovs_pnl = summary.get("kis_overseas_pnl", 0)
-        total_pnl = upbit_pnl + kis_dom_pnl + kis_ovs_pnl
+        total_pnl = summary.get("total_pnl", upbit_pnl + kis_dom_pnl + kis_ovs_pnl)
         wins = summary.get("win_count", 0)
         total = summary.get("trade_count", 0)
+        total_asset = summary.get("total_asset", 1_000_000)
+
         win_rate = f"{wins}/{total} ({wins/total*100:.0f}%)" if total > 0 else "0/0"
+        total_pct = f"{total_pnl/total_asset*100:+.2f}%" if total_asset > 0 else "+0.00%"
+
+        def _pnl_line(label: str, pnl: float) -> str:
+            sign = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+            return f"{sign} {label}: {self._format_krw(pnl)}"
+
         msg = (
             f"📊 <b>[일일 리포트] {date_str}</b>\n"
-            f"업비트: {upbit_pnl:+.1%} | 손익: {self._format_krw(upbit_pnl)}\n"
-            f"KIS 국내: {kis_dom_pnl:+.1%} | 손익: {self._format_krw(kis_dom_pnl)}\n"
-            f"KIS 해외: {kis_ovs_pnl:+.1%} | 손익: {self._format_krw(kis_ovs_pnl)}\n"
-            f"총 손익: {self._format_krw(total_pnl)} | 승률: {win_rate}"
+            f"{_pnl_line('업비트', upbit_pnl)}\n"
+            f"{_pnl_line('KIS 국내', kis_dom_pnl)}\n"
+            f"{_pnl_line('KIS 해외', kis_ovs_pnl)}\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"총 손익: <b>{self._format_krw(total_pnl)}</b> ({total_pct})\n"
+            f"승률: {win_rate} ({total}거래)"
+        )
+        self.send(msg)
+
+    def notify_screening(self, exchange: str, results: list, fallback: bool = False):
+        """스크리닝 완료 텔레그램 알람"""
+        label_map = {
+            "upbit": "업비트 코인",
+            "kis_domestic": "KIS 국내",
+            "kis_overseas": "KIS 해외",
+        }
+        label = label_map.get(exchange, exchange)
+
+        def _escape(text: str) -> str:
+            return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        if not results:
+            msg = f"🔍 <b>[스크리닝] {label}</b>\n조건 충족 종목 없음"
+            self.send(msg)
+            return
+
+        lines = []
+        for r in results:
+            reasons = _escape(", ".join(r.reasons)) if r.reasons else "-"
+            trend_emoji = "🟢" if r.trend == "bullish" else "🔴" if r.trend == "bearish" else "⚪"
+            display = f"{r.symbol} {r.name}" if getattr(r, "name", "") else r.symbol
+            lines.append(f"{trend_emoji} {_escape(display)} ({r.score:.0f}점) {reasons}")
+
+        suffix = f" (총 {len(results)}개" + (", fallback" if fallback else "") + ")"
+        msg = (
+            f"🔍 <b>[스크리닝] {label}</b>{suffix}\n"
+            + "\n".join(lines)
         )
         self.send(msg)
 

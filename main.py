@@ -3,11 +3,18 @@ AutoTrade Bot - 메인 진입점
 업비트 + KIS(국내/해외) 자동매매봇 + FastAPI 대시보드 동시 실행
 """
 import asyncio
+import dataclasses
+import json
 import logging
 import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+_SCREEN_CACHE = {
+    "kis_domestic": Path("screened_domestic.json"),
+    "kis_overseas": Path("screened_overseas.json"),
+}
 
 import uvicorn
 
@@ -94,7 +101,7 @@ class AutoTradeBot:
             on_resume=self._resume,
         )
         self.scheduler = BotScheduler()
-        self.screener = Screener(self.upbit, self.kis)
+        self.screener = Screener(self.upbit, self.kis, storage=self.storage)
         self._total_asset: float = 0.0
 
         # 스크리닝 결과: list[ScreenResult] (비어 있으면 config.yaml symbols 폴백)
@@ -103,6 +110,10 @@ class AutoTradeBot:
             "kis_domestic": [],
             "kis_overseas": [],
         }
+
+        # 손절 후 재진입 쿨다운: {(exchange, symbol): 손절 시각}
+        self._stop_loss_cooldown: dict[tuple, datetime] = {}
+        self._cooldown_hours: int = 24
 
     def _stop(self):
         logger.info("봇 중지 명령 수신")
@@ -423,11 +434,45 @@ class AutoTradeBot:
                 logger.error(f"포지션 복원 실패 {m.get('symbol')}: {e}")
         logger.info(f"포지션 복원 완료: {len(merged)}개")
 
+    def _restore_screened_symbols(self):
+        """봇 재시작 시 스크리닝 캐시 파일에서 결과 복원"""
+        for key, path in _SCREEN_CACHE.items():
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text())
+                self._screened_symbols[key] = [ScreenResult(**d) for d in data]
+                logger.info(f"스크리닝 캐시 복원: {key} {len(self._screened_symbols[key])}개 ← {path}")
+            except Exception as e:
+                logger.warning(f"스크리닝 캐시 로드 실패 ({path}): {e}")
+
+    def _save_screened_symbols(self, key: str):
+        """스크리닝 결과를 파일에 저장"""
+        path = _SCREEN_CACHE.get(key)
+        if not path:
+            return
+        try:
+            data = [dataclasses.asdict(r) for r in self._screened_symbols[key]]
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        except Exception as e:
+            logger.warning(f"스크리닝 캐시 저장 실패 ({path}): {e}")
+
     # ── 매수 실행 ─────────────────────────────────────────────────
     async def _execute_buy(self, exchange: str, symbol: str, price: float,
                            strategy: str, reason: str, market: str = ""):
-        if self.risk.check_daily_loss_limit(self.portfolio.daily_pnl, self._total_asset):
-            logger.warning(f"일일 손실 한도 도달 - {symbol} 매수 스킵")
+        # 손절 쿨다운 체크
+        cooldown_key = (exchange, symbol)
+        if cooldown_key in self._stop_loss_cooldown:
+            elapsed = (datetime.now() - self._stop_loss_cooldown[cooldown_key]).total_seconds() / 3600
+            if elapsed < self._cooldown_hours:
+                logger.info(f"쿨다운 중 매수 스킵: {exchange} {symbol} (손절 후 {elapsed:.1f}h / {self._cooldown_hours}h)")
+                return
+            else:
+                del self._stop_loss_cooldown[cooldown_key]
+
+        today_pnl = self.storage.get_today_pnl()
+        if self.risk.check_daily_loss_limit(today_pnl, self._total_asset):
+            logger.warning(f"일일 손실 한도 도달 (오늘 PnL={today_pnl:,.0f}원) - {symbol} 매수 스킵")
             return
 
         amount = self.risk.kelly_position_size(
@@ -442,15 +487,19 @@ class AutoTradeBot:
         # 손절가: 모든 전략 공통 -3% 안전망
         stop_price = self.risk.calculate_stop_price(price, "buy")
 
-        # 익절가: MTF만 전략 자체 계산값 사용, 나머지는 전략 신호로 청산
+        # 익절가 설정
         if strategy == "MTFStructureStrategy":
+            # MTF: 전략이 직접 SL/TP 계산
             strat_obj = self._strategies.get(strategy)
             strat_sl, strat_tp = strat_obj.get_last_sl_tp() if strat_obj and hasattr(strat_obj, "get_last_sl_tp") else (None, None)
             if strat_sl and strat_sl < price:
                 stop_price = strat_sl
             take_profit = strat_tp if (strat_tp and strat_tp > price) else self.risk.calculate_take_profit_price(price, "buy")
+        elif strategy == "BollingerBreakoutStrategy":
+            # 볼린저: risk.py TP +6% 사용 (전략 SELL = 브레이크아웃 실패 청산, risk TP = 수익 실현)
+            take_profit = self.risk.calculate_take_profit_price(price, "buy")
         else:
-            take_profit = 0.0  # 전략 자체 신호로 청산 (볼린저 중심선, 터틀 저점, 데드크로스 등)
+            take_profit = 0.0  # 터틀/추세추종: 전략 신호로만 청산 (터틀 저점, 데드크로스 등)
 
         try:
             if exchange == "upbit":
@@ -502,6 +551,10 @@ class AutoTradeBot:
             self.notifier.notify_sell(exchange, symbol, pos.strategy, price, pnl or 0, reason)
             logger.info(f"매도 완료: {exchange} {symbol} @ {price:.2f}, PnL={pnl:.2f}")
 
+            # 모든 청산 후 재진입 쿨다운 등록 (손절/익절/전략 청산 모두)
+            self._stop_loss_cooldown[(exchange, symbol)] = datetime.now()
+            logger.info(f"쿨다운 등록: {exchange} {symbol} → {self._cooldown_hours}시간 재진입 금지 [{reason}]")
+
         except Exception as e:
             logger.error(f"매도 실패 {exchange} {symbol}: {e}")
             self.notifier.notify_error(f"매도 {symbol}", str(e))
@@ -513,33 +566,42 @@ class AutoTradeBot:
         if results:
             self._screened_symbols["upbit"] = results
             logger.info(f"업비트 스크리닝 결과 반영: {[r.symbol for r in results]}")
+        self.notifier.notify_screening("upbit", results)
 
     async def run_screen_kis_domestic(self):
-        """16:30 KST: KIS 국내 스크리닝"""
+        """15:00 KST: KIS 국내 스크리닝"""
         results = await self.screener.screen_kis_domestic()
         if results:
             self._screened_symbols["kis_domestic"] = results
+            self._save_screened_symbols("kis_domestic")
             logger.info(f"KIS 국내 스크리닝 결과 반영: {[r.symbol for r in results]}")
+        self.notifier.notify_screening("kis_domestic", results)
 
     async def run_screen_kis_overseas(self):
         """06:00 KST: KIS 해외 스크리닝"""
         cfg_ovs = self.cfg.strategy.get("kis_overseas", {})
         market = cfg_ovs.get("market", "NAS")
         results = await self.screener.screen_kis_overseas(market=market)
+        fallback = not results  # 0개면 config fallback 사용
         if results:
             self._screened_symbols["kis_overseas"] = results
             logger.info(f"KIS 해외 스크리닝 결과 반영: {[r.symbol for r in results]}")
+        self.notifier.notify_screening("kis_overseas", results, fallback=fallback)
 
     # ── 일일 리포트 ───────────────────────────────────────────────
     async def send_daily_report(self):
         today = datetime.now().strftime("%Y-%m-%d")
         daily = self.storage.get_daily_summary()
+
+        total_asset = self._total_asset or 1_000_000
         self.notifier.notify_daily_report(today, {
-            "upbit_pnl": 0,
-            "kis_domestic_pnl": 0,
-            "kis_overseas_pnl": 0,
+            "upbit_pnl": daily["upbit_pnl"],
+            "kis_domestic_pnl": daily["kis_domestic_pnl"],
+            "kis_overseas_pnl": daily["kis_overseas_pnl"],
+            "total_pnl": daily["total_pnl"],
             "trade_count": daily["trade_count"],
             "win_count": daily["win_count"],
+            "total_asset": total_asset,
         })
         self.portfolio.reset_daily_pnl()
 
@@ -563,6 +625,9 @@ class AutoTradeBot:
 
         # 미청산 포지션 복원 (재시작 후 DB에서 복구)
         self._restore_open_positions()
+
+        # 스크리닝 결과 캐시 복원 (재시작 후 파일에서 복구)
+        self._restore_screened_symbols()
 
         set_bot_context({
             "portfolio": self.portfolio,

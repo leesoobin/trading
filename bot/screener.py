@@ -66,12 +66,14 @@ class Screener:
     def __init__(self, upbit_client, kis_client,
                  top_n_upbit: int = 30,
                  top_n_domestic: int = 30,
-                 top_n_overseas: int = 100):
+                 top_n_overseas: int = 100,
+                 storage=None):
         self.upbit = upbit_client
         self.kis = kis_client
         self.top_n_upbit = top_n_upbit
         self.top_n_domestic = top_n_domestic
         self.top_n_overseas = top_n_overseas
+        self._storage = storage
 
     # ── 기술적 점수 계산 ──────────────────────────────────────────
     @staticmethod
@@ -292,6 +294,15 @@ class Screener:
 
             candidates = await asyncio.to_thread(_fetch_volume_top)
             logger.info(f"[스크리너] 국내 후보: KOSPI+KOSDAQ {len(candidates)}개")
+
+            # 종목명 → DB 저장 (대시보드 종목 검색용)
+            if self._storage and candidates:
+                try:
+                    items = [(code, "domestic", name) for code, _, name in candidates]
+                    await asyncio.to_thread(self._storage.bulk_upsert_symbol_info, items)
+                    logger.debug(f"[스크리너] symbol_info {len(items)}개 DB 저장 완료")
+                except Exception as e:
+                    logger.warning(f"[스크리너] symbol_info 저장 실패: {e}")
 
             # 기술적 필터 (네이버 fchart 일봉 ~100거래일, 24시간 동작)
             import xml.etree.ElementTree as ET
