@@ -339,6 +339,48 @@ def _calc_trend(df) -> tuple[str, str]:
     return "HOLD", f"{trend} 유지 중"
 
 
+def _fetch_naver_fchart(code: str, timeframe: str = "day", count: int = 300) -> "pd.DataFrame":
+    """네이버 fchart XML → OHLCV DataFrame (24시간 동작)
+    일봉: timeframe=day, count=300
+    분봉: timeframe=minute (count 무시, 최근 ~6거래일치 반환)
+    """
+    import xml.etree.ElementTree as ET
+    import pandas as pd
+    import requests as _req
+
+    resp = _req.get(
+        "https://fchart.stock.naver.com/sise.nhn",
+        params={"symbol": code, "timeframe": timeframe, "count": count, "requestType": "0"},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content.decode("euc-kr", errors="replace"))
+    rows = []
+    for item in root.iter("item"):
+        parts = item.attrib.get("data", "").split("|")
+        if len(parts) < 6:
+            continue
+        try:
+            c = float(parts[4]) if parts[4] != "null" else None
+            if c is None:
+                continue
+            o = float(parts[1]) if parts[1] != "null" else c
+            h = float(parts[2]) if parts[2] != "null" else c
+            l = float(parts[3]) if parts[3] != "null" else c
+            v = float(parts[5]) if parts[5] != "null" else 0.0
+            rows.append({"date": parts[0].strip(), "open": o, "high": h, "low": l, "close": c, "volume": v})
+        except (ValueError, IndexError):
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    fmt = "%Y%m%d" if timeframe == "day" else "%Y%m%d%H%M"
+    df["date"] = pd.to_datetime(df["date"], format=fmt)
+    df = df.set_index("date").sort_index()
+    return df[["open", "high", "low", "close", "volume"]]
+
+
 async def _fetch_ohlcv(symbol: str, market: str, interval: str):
     """종목별 OHLCV 수집 (코인/국내/해외)"""
     import pandas as pd
@@ -356,21 +398,24 @@ async def _fetch_ohlcv(symbol: str, market: str, interval: str):
         return df[["open", "high", "low", "close", "volume"]]
 
     elif market == "domestic":
-        from pykrx import stock as pykrx_stock
-        from datetime import timedelta
-        if interval != "1d":
-            raise ValueError("국내 분봉은 장중에만 지원됩니다. 일봉(1d)을 선택하세요.")
-        end_dt = datetime.now()
-        start_dt = end_dt - timedelta(days=400)
-        df = await asyncio.to_thread(
-            pykrx_stock.get_market_ohlcv_by_date,
-            start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d"), symbol,
-        )
+        def _fchart_domestic():
+            if interval == "1d":
+                return _fetch_naver_fchart(symbol, "day", 300)
+            # 분봉: fchart minute → 리샘플
+            df_min = _fetch_naver_fchart(symbol, "minute")
+            if df_min.empty:
+                return df_min
+            resample_map = {"1h": "1h", "15m": "15min", "5m": "5min", "1m": "1min"}
+            rule = resample_map.get(interval, "1min")
+            return (
+                df_min.resample(rule)
+                .agg(open=("open", "first"), high=("high", "max"),
+                     low=("low", "min"), close=("close", "last"), volume=("volume", "sum"))
+                .dropna(subset=["close"])
+            )
+        df = await asyncio.to_thread(_fchart_domestic)
         if df is None or df.empty:
             return None
-        df = df.rename(columns={"시가": "open", "고가": "high", "저가": "low", "종가": "close", "거래량": "volume"})
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
         return df[["open", "high", "low", "close", "volume"]]
 
     elif market == "overseas":

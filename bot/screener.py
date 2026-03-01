@@ -242,15 +242,14 @@ class Screener:
     async def screen_kis_domestic(self) -> list[ScreenResult]:
         """
         KIS 국내 주식 스크리닝
-        pykrx로 KOSPI+KOSDAQ 거래량 상위 100개씩 조회 (장외 시간에도 동작)
-        → 일봉 60일치 기술적 점수 3점 이상 → top_n_domestic 반환
+        1단계: 네이버 거래량 순위 크롤링으로 KOSPI+KOSDAQ 상위 100개씩 조회 (24시간 동작)
+        2단계: 네이버 fchart XML 일봉 100개로 기술적 점수 산출 (pykrx 대체, 24시간 동작)
+        → 점수 3점 이상 → top_n_domestic 반환
 
         ScreenResult.market_type: "KOSPI" or "KOSDAQ" (main.py 분봉 타임프레임 결정용)
         """
         logger.info("[스크리너] KIS 국내 스크리닝 시작")
         try:
-            from pykrx import stock as pykrx_stock
-
             def _fetch_volume_top():
                 """네이버 금융 거래량 순위 크롤링 (24시간 동작).
                 실패 시 캐시 재사용.
@@ -294,29 +293,44 @@ class Screener:
             candidates = await asyncio.to_thread(_fetch_volume_top)
             logger.info(f"[스크리너] 국내 후보: KOSPI+KOSDAQ {len(candidates)}개")
 
-            # 기술적 필터 (pykrx 일봉 ~60거래일)
+            # 기술적 필터 (네이버 fchart 일봉 ~100거래일, 24시간 동작)
+            import xml.etree.ElementTree as ET
+
+            def _fchart_daily(code: str) -> pd.DataFrame:
+                resp = requests.get(
+                    "https://fchart.stock.naver.com/sise.nhn",
+                    params={"symbol": code, "timeframe": "day", "count": 100, "requestType": "0"},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                root = ET.fromstring(resp.content.decode("euc-kr", errors="replace"))
+                rows = []
+                for item in root.iter("item"):
+                    parts = item.attrib.get("data", "").split("|")
+                    if len(parts) < 6:
+                        continue
+                    try:
+                        rows.append({
+                            "open": float(parts[1]), "high": float(parts[2]),
+                            "low": float(parts[3]), "close": float(parts[4]),
+                            "volume": float(parts[5]),
+                        })
+                    except ValueError:
+                        continue
+                if not rows:
+                    return pd.DataFrame()
+                return pd.DataFrame(rows)
+
             results = []
             err_count = 0
             skip_count = 0
-            end_dt = datetime.now(_KST)
-            start_dt = end_dt - timedelta(days=100)
             for symbol, market_type, name in candidates:
                 try:
-                    df = await asyncio.to_thread(
-                        pykrx_stock.get_market_ohlcv_by_date,
-                        start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d"), symbol,
-                    )
+                    df = await asyncio.to_thread(_fchart_daily, symbol)
                     if df is None or len(df) < 20:
                         skip_count += 1
                         continue
-
-                    df = df.rename(columns={
-                        "시가": "open", "고가": "high", "저가": "low",
-                        "종가": "close", "거래량": "volume",
-                    })
-                    for col in ["open", "high", "low", "close", "volume"]:
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                    df = df.dropna(subset=["close"]).reset_index(drop=True)
 
                     score, trend, reasons = self._tech_score(df)
                     if score >= 3:
@@ -330,7 +344,7 @@ class Screener:
                     await asyncio.sleep(0.05)
                 except Exception as e:
                     err_count += 1
-                    logger.warning(f"pykrx {symbol} 분석 오류: {e}")
+                    logger.warning(f"fchart {symbol} 분석 오류: {e}")
 
             logger.info(f"[스크리너] 국내 처리 완료: 성공={len(candidates)-err_count-skip_count} 데이터부족={skip_count} 오류={err_count} 통과={len(results)}")
             results.sort(key=lambda x: x.score, reverse=True)
