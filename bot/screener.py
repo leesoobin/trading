@@ -5,16 +5,21 @@
 타임라인:
   00:30 KST → screen_upbit()          업비트 코인
   06:00 KST → screen_kis_overseas()   미국장 마감 후
-  15:00 KST → screen_kis_domestic()   한국 장중 (거래량 순위 API 장중 전용)
+  15:00 KST → screen_kis_domestic()   한국장 (pykrx 거래량 상위, 장외에도 동작)
 """
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytz
 import requests
+
+# 국내 후보 종목 캐시 경로 (주말/야간 스크리닝 시 재사용)
+_DOMESTIC_CACHE = Path(__file__).parent.parent / "data" / "domestic_candidates.json"
 
 _KST = pytz.timezone("Asia/Seoul")
 
@@ -52,6 +57,7 @@ class ScreenResult:
     trend: str
     market_type: str = ""          # KOSPI / KOSDAQ / NAS 구분 (main.py 타임프레임 결정용)
     reasons: list[str] = field(default_factory=list)
+    name: str = ""                 # 종목명 (텔레그램 알림용)
 
 
 class Screener:
@@ -192,7 +198,7 @@ class Screener:
                                 "vol24h": item.get("acc_trade_price_24h", 0),
                             })
                 except Exception as e:
-                    logger.debug(f"업비트 티커 배치 조회 오류: {e}")
+                    logger.warning(f"업비트 티커 배치 조회 오류: {e}")
                 await asyncio.sleep(0.3)
 
             # 거래대금 상위 40개 선별 (1순위)
@@ -221,7 +227,7 @@ class Screener:
                         ))
                     await asyncio.sleep(0.15)
                 except Exception as e:
-                    logger.debug(f"업비트 {symbol} 분석 오류: {e}")
+                    logger.warning(f"업비트 {symbol} 분석 오류: {e}")
 
             results.sort(key=lambda x: x.score, reverse=True)
             selected = results[:self.top_n_upbit]
@@ -236,70 +242,81 @@ class Screener:
     async def screen_kis_domestic(self) -> list[ScreenResult]:
         """
         KIS 국내 주식 스크리닝
-        1순위: KOSPI+KOSDAQ 거래량 순위 상위 100개씩 (장중 09:00~15:20만 동작)
-        2순위: 일봉 60일치 기술적 점수 3점 이상 → top_n_domestic 반환 (ScreenResult 리스트)
+        pykrx로 KOSPI+KOSDAQ 거래량 상위 100개씩 조회 (장외 시간에도 동작)
+        → 일봉 60일치 기술적 점수 3점 이상 → top_n_domestic 반환
 
         ScreenResult.market_type: "KOSPI" or "KOSDAQ" (main.py 분봉 타임프레임 결정용)
         """
-        # 거래량 순위 API는 장중(09:00~15:20)에만 동작 — 장외 시간엔 스킵
-        now = datetime.now(_KST)
-        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        market_close = now.replace(hour=15, minute=20, second=0, microsecond=0)
-        if not (market_open <= now <= market_close):
-            logger.info(
-                f"[스크리너] KIS 국내 장외 시간({now.strftime('%H:%M')}) — 스크리닝 스킵 (장중 15:00에 실행됨)"
-            )
-            return []
-
         logger.info("[스크리너] KIS 국내 스크리닝 시작")
         try:
-            # KOSPI + KOSDAQ 거래량 순위 (market_type 정보 유지)
-            kospi_top = self.kis.get_domestic_volume_ranking(market="J", top_n=100)
-            await asyncio.sleep(0.5)
-            kosdaq_top = self.kis.get_domestic_volume_ranking(market="Q", top_n=100)
+            from pykrx import stock as pykrx_stock
 
-            # 거래량 급증 기준 정렬 + market_type 태깅
-            candidates = []
-            for item in kospi_top:
-                code = item.get("mksc_shrn_iscd", "").strip()
-                if not code:
-                    continue
-                prdy_vol = max(int(item.get("prdy_vol", "1") or "1"), 1)
-                acml_vol = int(item.get("acml_vol", "0") or "0")
-                candidates.append({"symbol": code, "surge": acml_vol / prdy_vol, "market_type": "KOSPI"})
+            def _fetch_volume_top():
+                """네이버 금융 거래량 순위 크롤링 (24시간 동작).
+                실패 시 캐시 재사용.
+                """
+                from bs4 import BeautifulSoup
+                headers = {"User-Agent": "Mozilla/5.0"}
+                result = []
+                for market_name, sosok in [("KOSPI", 0), ("KOSDAQ", 1)]:
+                    page = 1
+                    while len([r for r in result if r[1] == market_name]) < 100:
+                        url = f"https://finance.naver.com/sise/sise_quant.nhn?sosok={sosok}&page={page}"
+                        resp = requests.get(url, headers=headers, timeout=10)
+                        resp.encoding = "euc-kr"
+                        soup = BeautifulSoup(resp.text, "lxml")
+                        rows = soup.select("table.type_2 tr")
+                        found = 0
+                        for tr in rows:
+                            a = tr.select_one("td a[href*=code]")
+                            if not a:
+                                continue
+                            code = a["href"].split("code=")[-1]
+                            name = a.text.strip()
+                            result.append((code, market_name, name))
+                            found += 1
+                        if found == 0:
+                            break
+                        page += 1
+                # 성공 시 캐시 저장
+                if result:
+                    _DOMESTIC_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                    _DOMESTIC_CACHE.write_text(json.dumps(result, ensure_ascii=False))
+                    logger.info(f"[스크리너] 네이버 거래량 크롤링 성공, 캐시 저장 ({len(result)}개)")
+                    return result
+                # 실패 시 캐시 로드
+                if _DOMESTIC_CACHE.exists():
+                    cached = json.loads(_DOMESTIC_CACHE.read_text())
+                    logger.info(f"[스크리너] 크롤링 실패 → 캐시 재사용 ({len(cached)}개)")
+                    return cached
+                raise RuntimeError("거래량 후보 조회 실패 (캐시도 없음)")
 
-            for item in kosdaq_top:
-                code = item.get("mksc_shrn_iscd", "").strip()
-                if not code:
-                    continue
-                prdy_vol = max(int(item.get("prdy_vol", "1") or "1"), 1)
-                acml_vol = int(item.get("acml_vol", "0") or "0")
-                candidates.append({"symbol": code, "surge": acml_vol / prdy_vol, "market_type": "KOSDAQ"})
+            candidates = await asyncio.to_thread(_fetch_volume_top)
+            logger.info(f"[스크리너] 국내 후보: KOSPI+KOSDAQ {len(candidates)}개")
 
-            candidates.sort(key=lambda x: x["surge"], reverse=True)
-            top_candidates = [c for c in candidates[:150] if c["symbol"]]
-
-            # 기술적 필터 (일봉 60일치)
+            # 기술적 필터 (pykrx 일봉 ~60거래일)
             results = []
-            for cand in top_candidates:
-                symbol = cand["symbol"]
-                market_type = cand["market_type"]
+            err_count = 0
+            skip_count = 0
+            end_dt = datetime.now(_KST)
+            start_dt = end_dt - timedelta(days=100)
+            for symbol, market_type, name in candidates:
                 try:
-                    raw = self.kis.get_domestic_daily_chart(symbol, count=60)
-                    if not raw or len(raw) < 20:
-                        await asyncio.sleep(0.6)
+                    df = await asyncio.to_thread(
+                        pykrx_stock.get_market_ohlcv_by_date,
+                        start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d"), symbol,
+                    )
+                    if df is None or len(df) < 20:
+                        skip_count += 1
                         continue
 
-                    df = pd.DataFrame(raw)
                     df = df.rename(columns={
-                        "stck_bsop_date": "datetime",
-                        "stck_oprc": "open", "stck_hgpr": "high",
-                        "stck_lwpr": "low", "stck_clpr": "close",
-                        "acml_vol": "volume",
+                        "시가": "open", "고가": "high", "저가": "low",
+                        "종가": "close", "거래량": "volume",
                     })
                     for col in ["open", "high", "low", "close", "volume"]:
                         df[col] = pd.to_numeric(df[col], errors="coerce")
-                    df = df.dropna(subset=["close"]).sort_values("datetime").reset_index(drop=True)
+                    df = df.dropna(subset=["close"]).reset_index(drop=True)
 
                     score, trend, reasons = self._tech_score(df)
                     if score >= 3:
@@ -308,12 +325,14 @@ class Screener:
                             score=score, trend=trend,
                             market_type=market_type,
                             reasons=reasons,
+                            name=name,
                         ))
-                    await asyncio.sleep(0.6)  # KIS 초당 1회 제한
+                    await asyncio.sleep(0.05)
                 except Exception as e:
-                    logger.debug(f"KIS 국내 {symbol} 분석 오류: {e}")
-                    await asyncio.sleep(0.6)
+                    err_count += 1
+                    logger.warning(f"pykrx {symbol} 분석 오류: {e}")
 
+            logger.info(f"[스크리너] 국내 처리 완료: 성공={len(candidates)-err_count-skip_count} 데이터부족={skip_count} 오류={err_count} 통과={len(results)}")
             results.sort(key=lambda x: x.score, reverse=True)
             selected = results[:self.top_n_domestic]
             logger.info(f"[스크리너] KIS 국내 완료: {len(selected)}개 선별 → {[r.symbol for r in selected]}")
@@ -374,7 +393,7 @@ class Screener:
                             reasons=reasons,
                         ))
                 except Exception as e:
-                    logger.debug(f"yfinance {symbol} 분석 오류: {e}")
+                    logger.warning(f"yfinance {symbol} 분석 오류: {e}")
 
             results.sort(key=lambda x: x.score, reverse=True)
             selected = results[:self.top_n_overseas]

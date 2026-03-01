@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 echo "=== AutoTrade Bot 시작 ==="
 
 # 기존 프로세스 종료
-PIDS=$(lsof -ti :8080 2>/dev/null)
+PIDS=$(lsof -ti :8080 -sTCP:LISTEN 2>/dev/null)
 if [ -n "$PIDS" ]; then
   echo "기존 프로세스 종료: PID $PIDS"
   echo "$PIDS" | xargs kill -9 2>/dev/null

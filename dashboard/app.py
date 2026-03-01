@@ -178,11 +178,13 @@ async def get_trades(limit: int = 20):
 @app.get("/api/pnl-chart")
 async def get_pnl_chart(days: int = 30):
     if _bot_context is None:
-        return _MOCK_PNL_CHART[-days:]
+        return {"pnl": _MOCK_PNL_CHART[-days:], "buy_dates": [], "sell_dates": []}
     storage = _bot_context.get("storage")
     if storage is None:
-        return _MOCK_PNL_CHART[-days:]
-    return storage.get_pnl_chart_data(days)
+        return {"pnl": _MOCK_PNL_CHART[-days:], "buy_dates": [], "sell_dates": []}
+    pnl = storage.get_pnl_chart_data(days)
+    events = storage.get_trade_events(days)
+    return {"pnl": pnl, **events}
 
 
 @app.get("/api/strategy-stats")
@@ -253,6 +255,276 @@ async def _broadcast(data: dict):
             dead.append(ws)
     for ws in dead:
         _ws_clients.remove(ws)
+
+
+# ── 종목 분석 헬퍼 ────────────────────────────────────────────────
+def _calc_signal_markers(df) -> list[dict]:
+    """과거 OHLCV에서 터틀·추세추종 전략 시그널 발생 날짜 반환 (최근 120봉 기준)"""
+    import pandas as pd
+    markers = []
+    df = df.copy()
+
+    # ── 터틀 전략 시그널 ──────────────────────────────────────────
+    if len(df) >= 56:
+        high55 = df["high"].shift(1).rolling(55).max()
+        low20 = df["low"].rolling(20).min()
+        for i in range(55, len(df)):
+            ts = str(df.index[i])[:10]
+            c = float(df["close"].iloc[i])
+            prev_c = float(df["close"].iloc[i - 1])
+            h55 = float(high55.iloc[i]) if not pd.isna(high55.iloc[i]) else None
+            l20 = float(low20.iloc[i]) if not pd.isna(low20.iloc[i]) else None
+            if h55 and prev_c <= h55 < c:
+                markers.append({"time": ts, "type": "turtle_buy",  "text": "터틀매수"})
+            elif l20 and c < l20:
+                markers.append({"time": ts, "type": "turtle_sell", "text": "터틀청산"})
+
+    # ── 추세추종 전략 시그널 ─────────────────────────────────────
+    if len(df) >= 201:
+        ma20  = df["close"].rolling(20).mean()
+        ma200 = df["close"].rolling(200).mean()
+        for i in range(200, len(df)):
+            ts = str(df.index[i])[:10]
+            if pd.isna(ma20.iloc[i - 1]) or pd.isna(ma200.iloc[i - 1]):
+                continue
+            if float(ma20.iloc[i - 1]) <= float(ma200.iloc[i - 1]) and float(ma20.iloc[i]) > float(ma200.iloc[i]):
+                markers.append({"time": ts, "type": "trend_buy",  "text": "추세매수"})
+            elif float(ma20.iloc[i - 1]) >= float(ma200.iloc[i - 1]) and float(ma20.iloc[i]) < float(ma200.iloc[i]):
+                markers.append({"time": ts, "type": "trend_sell", "text": "추세청산"})
+
+    # 최근 120봉 범위로 자르기
+    cutoff = str(df.index[-120])[:10] if len(df) >= 120 else str(df.index[0])[:10]
+    markers = [m for m in markers if m["time"] >= cutoff]
+    # 같은 날짜에 중복 마커 제거 (type 기준 최초 1개)
+    seen: set[str] = set()
+    deduped = []
+    for m in markers:
+        key = m["time"] + m["type"]
+        if key not in seen:
+            seen.add(key)
+            deduped.append(m)
+    return deduped
+
+
+def _calc_turtle(df) -> tuple[str, str]:
+    """터틀 전략 시그널: 55일 신고가 돌파 / 20일 최저가 이탈"""
+    if len(df) < 56:
+        return "HOLD", "데이터 부족 (55봉 미만)"
+    high55 = float(df["high"].rolling(55).max().iloc[-2])
+    low20 = float(df["low"].rolling(20).min().iloc[-1])
+    curr = float(df["close"].iloc[-1])
+    prev = float(df["close"].iloc[-2])
+    if prev <= high55 < curr:
+        return "BUY", "55일 신고가 돌파"
+    if curr < low20:
+        return "SELL", "20일 최저가 이탈"
+    return "HOLD", "신호 없음"
+
+
+def _calc_trend(df) -> tuple[str, str]:
+    """추세추종 전략 시그널: MA20/MA200 골든크로스·데드크로스"""
+    if len(df) < 201:
+        if len(df) < 21:
+            return "HOLD", "데이터 부족 (20봉 미만)"
+        ma20 = df["close"].rolling(20).mean()
+        direction = "상승" if float(ma20.iloc[-1]) > float(ma20.iloc[-10]) else "하락"
+        return "HOLD", f"MA200 데이터 부족 — {direction} 중"
+    ma20 = df["close"].rolling(20).mean()
+    ma200 = df["close"].rolling(200).mean()
+    if float(ma20.iloc[-2]) <= float(ma200.iloc[-2]) and float(ma20.iloc[-1]) > float(ma200.iloc[-1]):
+        return "BUY", "MA20/MA200 골든크로스"
+    if float(ma20.iloc[-2]) >= float(ma200.iloc[-2]) and float(ma20.iloc[-1]) < float(ma200.iloc[-1]):
+        return "SELL", "MA20/MA200 데드크로스"
+    trend = "상승 추세" if float(ma20.iloc[-1]) > float(ma200.iloc[-1]) else "하락 추세"
+    return "HOLD", f"{trend} 유지 중"
+
+
+async def _fetch_ohlcv(symbol: str, market: str, interval: str):
+    """종목별 OHLCV 수집 (코인/국내/해외)"""
+    import pandas as pd
+
+    if market == "coin":
+        import pyupbit
+        iv_map = {"1m": "minute1", "5m": "minute5", "15m": "minute15", "1h": "minute60", "1d": "day"}
+        count_map = {"1d": 300, "1h": 200, "15m": 200, "5m": 200, "1m": 200}
+        pv_iv = iv_map.get(interval, "day")
+        count = count_map.get(interval, 300)
+        df = await asyncio.to_thread(pyupbit.get_ohlcv, symbol, pv_iv, count)
+        if df is None or df.empty:
+            return None
+        df.columns = [c.lower() for c in df.columns]
+        return df[["open", "high", "low", "close", "volume"]]
+
+    elif market == "domestic":
+        from pykrx import stock as pykrx_stock
+        from datetime import timedelta
+        if interval != "1d":
+            raise ValueError("국내 분봉은 장중에만 지원됩니다. 일봉(1d)을 선택하세요.")
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=400)
+        df = await asyncio.to_thread(
+            pykrx_stock.get_market_ohlcv_by_date,
+            start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d"), symbol,
+        )
+        if df is None or df.empty:
+            return None
+        df = df.rename(columns={"시가": "open", "고가": "high", "저가": "low", "종가": "close", "거래량": "volume"})
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df[["open", "high", "low", "close", "volume"]]
+
+    elif market == "overseas":
+        import yfinance as yf
+        period_map = {"1d": "1y", "1h": "60d", "15m": "5d", "5m": "5d", "1m": "5d"}
+        iv_map = {"1d": "1d", "1h": "1h", "15m": "15m", "5m": "5m", "1m": "1m"}
+        yf_period = period_map.get(interval, "1y")
+        yf_iv = iv_map.get(interval, "1d")
+        df = await asyncio.to_thread(
+            yf.download, symbol, period=yf_period, interval=yf_iv,
+            progress=False, auto_adjust=True,
+        )
+        if df is None or df.empty:
+            return None
+        import pandas as pd
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+        df = df[["open", "high", "low", "close", "volume"]]
+        df = df.dropna(subset=["open", "high", "low", "close"])
+        df["volume"] = df["volume"].fillna(0)
+        return df
+
+    return None
+
+
+def _resolve_domestic_symbol(query: str) -> str:
+    """국내 주식 종목명 → 코드 변환 (숫자면 그대로 반환)
+    스크리너 캐시(domestic_candidates.json) 우선 사용 → 네이버 API 폴백
+    """
+    if query.isdigit():
+        return query
+    # 1순위: 스크리너 캐시 (주말/야간에도 동작)
+    try:
+        import json
+        from pathlib import Path
+        cache_path = Path(__file__).parent.parent / "data" / "domestic_candidates.json"
+        if cache_path.exists():
+            for code, market, name in json.loads(cache_path.read_text()):
+                if name == query:
+                    return code
+    except Exception:
+        pass
+    # 2순위: 네이버 금융 자동완성 API
+    try:
+        import requests as _req
+        resp = _req.get(
+            "https://ac.finance.naver.com/ac",
+            params={"q": query, "target": "stock"},
+            timeout=5,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        data = resp.json()
+        raw = data.get("items", [])
+        candidates = raw[0] if raw and isinstance(raw[0], list) and raw[0] and isinstance(raw[0][0], list) else raw
+        for item in candidates:
+            if len(item) >= 2 and item[1] == query:
+                return item[0]
+        if candidates:
+            return candidates[0][0]
+    except Exception:
+        pass
+    return query  # 변환 실패 시 원본 반환
+
+
+@app.get("/api/analyze")
+async def analyze_symbol(symbol: str, market: str = "overseas", interval: str = "1d"):
+    """종목 분석: 전략 시그널 + 기술점수 + 매매 추천"""
+    try:
+        from bot.screener import Screener
+
+        if market == "domestic":
+            resolved = await asyncio.to_thread(_resolve_domestic_symbol, symbol)
+            if not resolved.isdigit():
+                return {"symbol": symbol, "error": f"종목명 '{symbol}'을 찾을 수 없습니다. 코드(예: 005930)로 직접 입력해주세요."}
+            symbol = resolved
+
+        df = await _fetch_ohlcv(symbol, market, interval)
+        if df is None or len(df) < 20:
+            return {"symbol": symbol, "error": f"데이터 부족 (20봉 미만) — 종목코드가 맞는지 확인해주세요."}
+
+        current_price = float(df["close"].iloc[-1])
+        tech_score, trend, reasons = Screener._tech_score(df)
+
+        turtle_signal, turtle_reason = _calc_turtle(df)
+        trend_signal, trend_reason = _calc_trend(df)
+
+        signals = [
+            {"strategy": "turtle", "signal": turtle_signal, "reason": turtle_reason},
+            {"strategy": "trend_following", "signal": trend_signal, "reason": trend_reason},
+        ]
+
+        action = "BUY" if any(s["signal"] == "BUY" for s in signals) else (
+            "SELL" if any(s["signal"] == "SELL" for s in signals) else "HOLD"
+        )
+        rec = {
+            "action": action,
+            "buy_price": current_price,
+            "stop_loss": round(current_price * 0.97, 4),
+            "stop_loss_pct": -3.0,
+            "target": round(current_price * 1.06, 4),
+            "target_pct": 6.0,
+        }
+
+        import math
+        ohlcv = []
+        for idx, row in df.tail(120).iterrows():
+            o, h, l, c, v = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row["volume"])
+            if any(math.isnan(x) or math.isinf(x) for x in [o, h, l, c]):
+                continue
+            ohlcv.append({
+                "time": str(idx)[:10],
+                "open": o, "high": h, "low": l, "close": c,
+                "volume": 0.0 if math.isnan(v) else v,
+            })
+
+        # 거래 이력 (해당 종목)
+        trades = []
+        if _bot_context:
+            storage = _bot_context.get("storage")
+            if storage:
+                try:
+                    raw = storage.get_trades_by_symbol(symbol)
+                    trades = [
+                        {
+                            "date": t["timestamp"][:10],
+                            "side": t["side"],
+                            "strategy": t["strategy"],
+                            "price": t["price"],
+                            "reason": t.get("reason", ""),
+                        }
+                        for t in raw
+                    ]
+                except Exception:
+                    pass
+
+        signal_markers = _calc_signal_markers(df)
+
+        return {
+            "symbol": symbol,
+            "current_price": current_price,
+            "tech_score": tech_score,
+            "trend": trend,
+            "reasons": reasons,
+            "ohlcv": ohlcv,
+            "signals": signals,
+            "recommendation": rec,
+            "trades": trades,
+            "signal_markers": signal_markers,
+            "error": None,
+        }
+    except Exception as e:
+        logger.error(f"[분석] {symbol} 오류: {e}")
+        return {"symbol": symbol, "error": str(e)}
 
 
 if __name__ == "__main__":

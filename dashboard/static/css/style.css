@@ -65,3 +65,43 @@ body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', syste
 .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
 .badge-buy { background: rgba(34,197,94,.15); color: var(--green); }
 .badge-sell { background: rgba(239,68,68,.15); color: var(--red); }
+
+/* Tab Navigation */
+.tab-nav { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 0; }
+.tab-btn { background: none; border: none; color: var(--text-sub); font-size: 14px; font-weight: 600; padding: 10px 16px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .2s, border-color .2s; }
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+/* Analyze Form */
+.analyze-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.analyze-form select, .analyze-input { background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 7px 12px; font-size: 13px; }
+.analyze-input { flex: 1; min-width: 140px; }
+.analyze-sample { font-size: 12px; color: var(--text-sub); margin-top: 8px; }
+.loading-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 4px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Analyze Result */
+.analyze-info { display: flex; gap: 24px; flex-wrap: wrap; font-size: 14px; margin-bottom: 12px; }
+.analyze-info span { color: var(--text-sub); }
+.analyze-info b { color: var(--text); }
+.signal-buy { color: var(--green); font-weight: 700; }
+.signal-sell { color: var(--red); font-weight: 700; }
+.signal-hold { color: var(--yellow); font-weight: 700; }
+
+/* Recommendation Grid */
+.rec-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.rec-card { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; text-align: center; }
+.rec-card .rec-label { font-size: 11px; color: var(--text-sub); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+.rec-card .rec-value { font-size: 18px; font-weight: 700; }
+.rec-card .rec-pct { font-size: 12px; margin-top: 4px; }
+@media (max-width: 600px) { .rec-grid { grid-template-columns: 1fr; } }
+
+/* TradingView Modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.modal-box { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; width: 90%; max-width: 900px; position: relative; }
+.modal-close { position: absolute; top: 12px; right: 12px; background: none; border: none; color: var(--text-sub); font-size: 20px; cursor: pointer; z-index: 1; }
+.modal-close:hover { color: var(--text); }
+
+/* Chart button in table */
+.btn-chart { background: none; border: 1px solid var(--border); color: var(--text-sub); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 13px; }
+.btn-chart:hover { border-color: var(--blue); color: var(--blue); }
