@@ -154,7 +154,12 @@ class DataSync:
             result = [
                 (r["symbol"], "overseas", r.get("name", r["symbol"]))
                 for r in rows
-                if r.get("symbol") and r["symbol"].isalpha()  # 특수문자 심볼 제외 (워런트/유닛 등)
+                if r.get("symbol")
+                and r["symbol"].isalpha()          # 특수문자 심볼 제외
+                and len(r["symbol"]) <= 5          # 6자 이상 = 워런트/유닛(HVMCW 등) 제외
+                and not r["symbol"].endswith("W")  # 워런트 접미사 W 제외
+                and not r["symbol"].endswith("U")  # 유닛 접미사 U 제외
+                and not r["symbol"].endswith("R")  # 권리 접미사 R 제외
             ]
             logger.info(f"[DataSync] NASDAQ 전체 유니버스: {len(result)}개 수집")
             return result
@@ -171,7 +176,11 @@ class DataSync:
 
         Returns: {symbol: DataFrame(open/high/low/close/volume)}
         """
+        import logging as _logging
         import yfinance as yf
+
+        # yfinance 내부 에러 로그(상폐 종목 등) 억제 — 우리 코드에서 직접 처리
+        _logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
         try:
             hist = yf.download(
@@ -183,12 +192,19 @@ class DataSync:
                 auto_adjust=True,
                 threads=True,
             )
+            if hist is None or hist.empty:
+                return {}
             result = {}
             for sym in symbols:
                 try:
-                    df_raw = hist[sym] if isinstance(hist.columns, pd.MultiIndex) else hist
+                    if isinstance(hist.columns, pd.MultiIndex):
+                        if sym not in hist.columns.get_level_values(0):
+                            continue
+                        df_raw = hist[sym].copy()
+                    else:
+                        df_raw = hist.copy()
                     df_raw = df_raw.dropna(subset=["Close"])
-                    if df_raw is None or len(df_raw) < 5:
+                    if len(df_raw) < 5:
                         continue
                     df = df_raw[["Open", "High", "Low", "Close", "Volume"]].copy()
                     df.columns = ["open", "high", "low", "close", "volume"]

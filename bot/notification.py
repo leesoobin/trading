@@ -36,14 +36,19 @@ class TelegramNotifier:
             return "₩0"
         return f"₩{amount:.8f}"
 
+    _MAX_LEN = 4000  # 텔레그램 메시지 최대 길이 (4096 - 여유)
+
     async def send_message(self, text: str):
         if not _HAS_TELEGRAM:
             logger.info(f"[Telegram 비활성화] {text}")
             return
+        # 4000자 초과 시 청크 분할 전송
+        chunks = [text[i:i + self._MAX_LEN] for i in range(0, len(text), self._MAX_LEN)]
         try:
             bot = Bot(token=self.bot_token)
             async with bot:
-                await bot.send_message(chat_id=self.chat_id, text=text, parse_mode="HTML")
+                for chunk in chunks:
+                    await bot.send_message(chat_id=self.chat_id, text=chunk, parse_mode="HTML")
         except Exception as e:
             logger.error(f"텔레그램 전송 실패: {e}")
 
@@ -144,14 +149,17 @@ class TelegramNotifier:
             self.send(msg)
             return
 
+        MAX_SHOW = 30  # 텔레그램 표시 상위 N개
+        show = results[:MAX_SHOW]
         lines = []
-        for r in results:
+        for r in show:
             reasons = _escape(", ".join(r.reasons)) if r.reasons else "-"
             trend_emoji = "🟢" if r.trend == "bullish" else "🔴" if r.trend == "bearish" else "⚪"
             display = f"{r.symbol} {r.name}" if getattr(r, "name", "") else r.symbol
             lines.append(f"{trend_emoji} {_escape(display)} ({r.score:.0f}점) {reasons}")
 
-        suffix = f" (총 {len(results)}개" + (", fallback" if fallback else "") + ")"
+        total = len(results)
+        suffix = f" (총 {total}개" + (f", 상위 {MAX_SHOW}개 표시" if total > MAX_SHOW else "") + (", fallback" if fallback else "") + ")"
         msg = (
             f"🔍 <b>[스크리닝] {label}</b>{suffix}\n"
             + "\n".join(lines)
