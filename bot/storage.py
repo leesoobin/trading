@@ -342,6 +342,20 @@ class Storage:
                 ).fetchone()
         return row["name"] if row else None
 
+    def get_all_symbols(self, market: str = None) -> list[tuple[str, str, str]]:
+        """symbol_info 전체 목록 반환: [(symbol, market, name), ...]"""
+        with self._conn() as conn:
+            if market:
+                rows = conn.execute(
+                    "SELECT symbol, market, name FROM symbol_info WHERE market=? ORDER BY symbol",
+                    (market,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT symbol, market, name FROM symbol_info ORDER BY symbol"
+                ).fetchall()
+        return [(r["symbol"], r["market"], r["name"] or "") for r in rows]
+
     def search_symbols(self, query: str, market: str = None, limit: int = 10) -> list[dict]:
         """종목명 부분 검색 (자동완성용)"""
         with self._conn() as conn:

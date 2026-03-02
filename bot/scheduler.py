@@ -104,13 +104,27 @@ class BotScheduler:
             replace_existing=True,
         )
 
-    def add_screening_jobs(self, screen_upbit, screen_kr, screen_us):
-        """새벽 배치 스크리닝 스케줄 등록
-        - 00:30 KST: 업비트 코인 스크리닝
-        - 06:00 KST: 미국장 마감 후 해외 스크리닝
-        - 15:00 KST: 한국 장중 국내 스크리닝 (거래량 순위 API 장중 전용)
+    def add_data_sync_job(self, func):
+        """12:30 KST (매일): 데이터 업데이트 + 스크리닝 통합 잡
 
-        misfire_grace_time=300: 이벤트 루프가 잠깐 바빠도 5분 이내면 실행
+        DataSync.sync_all() → 스크리닝 3개 순서로 실행
+        misfire_grace_time=300: 이벤트 루프 지연 5분 이내면 실행 보장
+        """
+        self._scheduler.add_job(
+            func,
+            trigger=CronTrigger(hour=12, minute=30, timezone=KST),
+            id="data_sync_and_screen",
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
+        logger.info("데이터+스크리닝 통합 스케줄 등록: 매일 12:30 KST")
+
+    def add_screening_jobs(self, screen_upbit, screen_kr, screen_us):
+        """[하위 호환] 개별 스크리닝 스케줄 등록 — add_data_sync_job() 권장
+
+        - 00:30 KST: 업비트 코인
+        - 06:00 KST: 미국장 마감 후 해외
+        - 15:00 KST: 국내
         """
         self._scheduler.add_job(
             screen_upbit,
@@ -133,7 +147,7 @@ class BotScheduler:
             replace_existing=True,
             misfire_grace_time=300,
         )
-        logger.info("스크리닝 스케줄 등록: 00:30(업비트) / 06:00(미국) / 15:00(국내 장중)")
+        logger.info("스크리닝 스케줄 등록: 00:30(업비트) / 06:00(미국) / 15:00(국내)")
 
     def start(self):
         self._scheduler.start()

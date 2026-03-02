@@ -171,8 +171,9 @@ class Screener:
     async def screen_upbit(self) -> list[ScreenResult]:
         """
         업비트 KRW 코인 스크리닝
-        1순위: 24시간 거래대금 상위 40개
-        2순위: 4H봉 HTF 기술적 점수 3점 이상 → top_n_upbit 반환 (ScreenResult 리스트)
+        1순위: 24시간 거래대금 상위 40개 (실시간 Upbit API)
+        2순위: DB 일봉 → 기술적 점수 3점 이상 → top_n_upbit 반환
+               DB 미보유 시 pyupbit API 폴백
         """
         logger.info("[스크리너] 업비트 스크리닝 시작")
         try:
@@ -203,22 +204,30 @@ class Screener:
                     logger.warning(f"업비트 티커 배치 조회 오류: {e}")
                 await asyncio.sleep(0.3)
 
-            # 거래대금 상위 40개 선별 (1순위)
+            # 거래대금 상위 40개 선별
             candidates.sort(key=lambda x: x["vol24h"], reverse=True)
             top40 = [c["symbol"] for c in candidates[:40]]
 
-            # 기술적 필터: 4H봉 HTF 분석 (코인 데이트레이딩에 적합)
+            # 기술적 필터: DB 일봉 우선, 없으면 API 폴백
             results = []
             for symbol in top40:
                 try:
-                    # 4H봉 HTF 데이터 (100개 ≈ 16일)
-                    df = pyupbit.get_ohlcv(symbol, interval="240min", count=100)
+                    df = None
+                    # 1) DB에서 일봉 로드
+                    if self._storage:
+                        df = await asyncio.to_thread(
+                            self._storage.get_ohlcv, symbol, "upbit", "1d", 300
+                        )
+                    # 2) DB 미보유 시 pyupbit API 폴백
                     if df is None or len(df) < 20:
-                        # 4H봉 실패 시 일봉 폴백
-                        df = pyupbit.get_ohlcv(symbol, interval="day", count=200)
+                        df = await asyncio.to_thread(
+                            pyupbit.get_ohlcv, symbol, "day", 300
+                        )
+                        if df is not None:
+                            df.columns = [c.lower() for c in df.columns]
                     if df is None or len(df) < 20:
                         continue
-                    df.columns = [c.lower() for c in df.columns]
+
                     score, trend, reasons = self._tech_score(df)
                     if score >= 3:
                         results.append(ScreenResult(
@@ -227,7 +236,7 @@ class Screener:
                             market_type="upbit",
                             reasons=reasons,
                         ))
-                    await asyncio.sleep(0.15)
+                    await asyncio.sleep(0.05)
                 except Exception as e:
                     logger.warning(f"업비트 {symbol} 분석 오류: {e}")
 
@@ -244,18 +253,64 @@ class Screener:
     async def screen_kis_domestic(self) -> list[ScreenResult]:
         """
         KIS 국내 주식 스크리닝
-        1단계: 네이버 거래량 순위 크롤링으로 KOSPI+KOSDAQ 상위 100개씩 조회 (24시간 동작)
-        2단계: 네이버 fchart XML 일봉 100개로 기술적 점수 산출 (pykrx 대체, 24시간 동작)
-        → 점수 3점 이상 → top_n_domestic 반환
+
+        [DB 보유 시] DataSync가 미리 수집한 전체 유니버스 사용:
+          1단계: symbol_info DB에서 전체 KOSPI+KOSDAQ 목록 로드
+          2단계: 각 종목 OHLCV DB에서 로드 (API 재호출 없음)
+          3단계: 기술적 점수 3점 이상 → top_n_domestic 반환
+
+        [DB 미보유 시 폴백] 네이버 거래량 순위 크롤링 + fchart API:
+          기존 방식: 거래량 상위 100+100개 → fchart 일봉 → 점수 산출
 
         ScreenResult.market_type: "KOSPI" or "KOSDAQ" (main.py 분봉 타임프레임 결정용)
         """
         logger.info("[스크리너] KIS 국내 스크리닝 시작")
         try:
+            # ── DB 우선: 전체 유니버스 (DataSync가 미리 수집) ─────────
+            if self._storage:
+                kospi_list = await asyncio.to_thread(self._storage.get_all_symbols, "KOSPI")
+                kosdaq_list = await asyncio.to_thread(self._storage.get_all_symbols, "KOSDAQ")
+                all_universe = (
+                    [(c, "KOSPI", n) for c, _, n in kospi_list] +
+                    [(c, "KOSDAQ", n) for c, _, n in kosdaq_list]
+                )
+                if all_universe:
+                    logger.info(f"[스크리너] 국내 DB 유니버스: {len(all_universe)}개 (KOSPI+KOSDAQ)")
+                    results = []
+                    ok, skip = 0, 0
+                    for code, market_type, name in all_universe:
+                        try:
+                            df = await asyncio.to_thread(
+                                self._storage.get_ohlcv, code, market_type, "1d", 300
+                            )
+                            if df is None or len(df) < 20:
+                                skip += 1
+                                continue
+                            score, trend, reasons = self._tech_score(df)
+                            if score >= 3:
+                                results.append(ScreenResult(
+                                    symbol=code, exchange="kis_domestic",
+                                    score=score, trend=trend,
+                                    market_type=market_type,
+                                    reasons=reasons,
+                                    name=name,
+                                ))
+                            ok += 1
+                        except Exception as e:
+                            logger.debug(f"[스크리너] 국내 DB {code} 오류: {e}")
+                    logger.info(
+                        f"[스크리너] 국내 DB 완료: 처리={ok} 데이터부족={skip} 통과={len(results)}"
+                    )
+                    results.sort(key=lambda x: x.score, reverse=True)
+                    selected = results[:self.top_n_domestic]
+                    logger.info(f"[스크리너] KIS 국내 완료: {len(selected)}개 선별")
+                    return selected
+
+            # ── 폴백: 네이버 거래량 순위 + fchart API ───────────────
+            logger.info("[스크리너] 국내 DB 없음 → 네이버 거래량 순위 폴백")
+
             def _fetch_volume_top():
-                """네이버 금융 거래량 순위 크롤링 (24시간 동작).
-                실패 시 캐시 재사용.
-                """
+                """네이버 금융 거래량 순위 크롤링. 실패 시 캐시 재사용."""
                 from bs4 import BeautifulSoup
                 headers = {"User-Agent": "Mozilla/5.0"}
                 result = []
@@ -279,13 +334,11 @@ class Screener:
                         if found == 0:
                             break
                         page += 1
-                # 성공 시 캐시 저장
                 if result:
                     _DOMESTIC_CACHE.parent.mkdir(parents=True, exist_ok=True)
                     _DOMESTIC_CACHE.write_text(json.dumps(result, ensure_ascii=False))
-                    logger.info(f"[스크리너] 네이버 거래량 크롤링 성공, 캐시 저장 ({len(result)}개)")
+                    logger.info(f"[스크리너] 네이버 거래량 크롤링 성공 ({len(result)}개)")
                     return result
-                # 실패 시 캐시 로드
                 if _DOMESTIC_CACHE.exists():
                     cached = json.loads(_DOMESTIC_CACHE.read_text())
                     logger.info(f"[스크리너] 크롤링 실패 → 캐시 재사용 ({len(cached)}개)")
@@ -293,18 +346,15 @@ class Screener:
                 raise RuntimeError("거래량 후보 조회 실패 (캐시도 없음)")
 
             candidates = await asyncio.to_thread(_fetch_volume_top)
-            logger.info(f"[스크리너] 국내 후보: KOSPI+KOSDAQ {len(candidates)}개")
+            logger.info(f"[스크리너] 국내 폴백 후보: {len(candidates)}개")
 
-            # 종목명 → DB 저장 (대시보드 종목 검색용)
             if self._storage and candidates:
                 try:
                     items = [(code, "domestic", name) for code, _, name in candidates]
                     await asyncio.to_thread(self._storage.bulk_upsert_symbol_info, items)
-                    logger.debug(f"[스크리너] symbol_info {len(items)}개 DB 저장 완료")
                 except Exception as e:
                     logger.warning(f"[스크리너] symbol_info 저장 실패: {e}")
 
-            # 기술적 필터 (네이버 fchart 일봉 ~100거래일, 24시간 동작)
             import xml.etree.ElementTree as ET
 
             def _fchart_daily(code: str) -> pd.DataFrame:
@@ -342,7 +392,6 @@ class Screener:
                     if df is None or len(df) < 20:
                         skip_count += 1
                         continue
-
                     score, trend, reasons = self._tech_score(df)
                     if score >= 3:
                         results.append(ScreenResult(
@@ -357,10 +406,14 @@ class Screener:
                     err_count += 1
                     logger.warning(f"fchart {symbol} 분석 오류: {e}")
 
-            logger.info(f"[스크리너] 국내 처리 완료: 성공={len(candidates)-err_count-skip_count} 데이터부족={skip_count} 오류={err_count} 통과={len(results)}")
+            logger.info(
+                f"[스크리너] 국내 폴백 완료: "
+                f"성공={len(candidates)-err_count-skip_count} "
+                f"데이터부족={skip_count} 오류={err_count} 통과={len(results)}"
+            )
             results.sort(key=lambda x: x.score, reverse=True)
             selected = results[:self.top_n_domestic]
-            logger.info(f"[스크리너] KIS 국내 완료: {len(selected)}개 선별 → {[r.symbol for r in selected]}")
+            logger.info(f"[스크리너] KIS 국내 완료: {len(selected)}개 선별")
             return selected
 
         except Exception as e:
@@ -370,44 +423,45 @@ class Screener:
     # ── KIS 해외 스크리닝 ─────────────────────────────────────────
     async def screen_kis_overseas(self, market: str = "NAS") -> list[ScreenResult]:
         """
-        미국 주식 스크리닝 (yfinance 일봉 — KIS HHDFS76240000 대체)
+        미국 주식 스크리닝
 
-        KIS 해외 일봉 API(HHDFS76240000)는 계좌 권한 문제로 404 반환
-        → yfinance 배치 다운로드로 대체 (US_UNIVERSE 전체를 한번에)
-
-        1년치 일봉 → 기술적 점수 3점 이상 → top_n_overseas 반환
+        [DB 보유 시] DataSync가 미리 수집한 OHLCV 사용 (yfinance 재호출 없음)
+        [DB 미보유 시] yfinance 배치 다운로드 폴백
         """
         import yfinance as yf
 
-        logger.info(f"[스크리너] 해외({market}) 스크리닝 시작 (yfinance)")
+        logger.info(f"[스크리너] 해외({market}) 스크리닝 시작")
         try:
-            loop = asyncio.get_event_loop()
-
-            def _batch_download():
-                return yf.download(
-                    US_UNIVERSE,
-                    period="1y",
-                    interval="1d",
-                    group_by="ticker",
-                    progress=False,
-                    auto_adjust=True,
-                    threads=True,
-                )
-
-            hist = await loop.run_in_executor(None, _batch_download)
-
             results = []
+
             for symbol in US_UNIVERSE:
                 try:
-                    # MultiIndex: hist[symbol] 로 접근
-                    df_raw = hist[symbol] if isinstance(hist.columns, pd.MultiIndex) else hist
-                    df_raw = df_raw.dropna(subset=["Close"])
-                    if df_raw is None or len(df_raw) < 20:
-                        continue
+                    df = None
+                    # 1) DB에서 일봉 로드
+                    if self._storage:
+                        df = await asyncio.to_thread(
+                            self._storage.get_ohlcv, symbol, "overseas", "1d", 300
+                        )
 
-                    df = df_raw[["Open", "High", "Low", "Close", "Volume"]].copy()
-                    df.columns = ["open", "high", "low", "close", "volume"]
-                    df = df.reset_index(drop=True)
+                    # 2) DB 미보유 시 yfinance 폴백 (개별 다운로드)
+                    if df is None or len(df) < 20:
+                        def _single_dl(sym=symbol):
+                            import yfinance as _yf
+                            t = _yf.Ticker(sym)
+                            raw = t.history(period="1y", interval="1d", auto_adjust=True)
+                            if raw is None or len(raw) < 20:
+                                return None
+                            raw = raw.rename(columns={
+                                "Open": "open", "High": "high",
+                                "Low": "low", "Close": "close", "Volume": "volume",
+                            })
+                            return raw[["open", "high", "low", "close", "volume"]]
+
+                        df = await asyncio.to_thread(_single_dl)
+                        await asyncio.sleep(0.05)
+
+                    if df is None or len(df) < 20:
+                        continue
 
                     score, trend, reasons = self._tech_score(df)
                     if score >= 3:
@@ -418,13 +472,11 @@ class Screener:
                             reasons=reasons,
                         ))
                 except Exception as e:
-                    logger.warning(f"yfinance {symbol} 분석 오류: {e}")
+                    logger.warning(f"[스크리너] 해외 {symbol} 분석 오류: {e}")
 
             results.sort(key=lambda x: x.score, reverse=True)
             selected = results[:self.top_n_overseas]
-            logger.info(
-                f"[스크리너] 해외 완료: {len(selected)}개 선별 → {[r.symbol for r in selected]}"
-            )
+            logger.info(f"[스크리너] 해외 완료: {len(selected)}개 선별")
             return selected
 
         except Exception as e:

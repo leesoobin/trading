@@ -33,6 +33,7 @@ from bot.storage import Storage
 from bot.notification import TelegramNotifier
 from bot.scheduler import BotScheduler
 from bot.screener import Screener, ScreenResult
+from bot.data_sync import DataSync
 from dashboard.app import app as dashboard_app, set_bot_context
 
 # ── 로깅 설정 ──────────────────────────────────────────────────────
@@ -102,6 +103,7 @@ class AutoTradeBot:
         )
         self.scheduler = BotScheduler()
         self.screener = Screener(self.upbit, self.kis, storage=self.storage)
+        self.data_sync = DataSync(self.storage)
         self._total_asset: float = 0.0
 
         # 스크리닝 결과: list[ScreenResult] (비어 있으면 config.yaml symbols 폴백)
@@ -559,6 +561,29 @@ class AutoTradeBot:
             logger.error(f"매도 실패 {exchange} {symbol}: {e}")
             self.notifier.notify_error(f"매도 {symbol}", str(e))
 
+    # ── 데이터 업데이트 + 스크리닝 통합 (12:30 KST) ─────────────
+    async def run_data_and_screen(self):
+        """12:30 KST: 전체 데이터 업데이트 후 스크리닝 실행"""
+        try:
+            cfg_ovs = self.cfg.strategy.get("kis_overseas", {})
+            market = cfg_ovs.get("market", "NAS")
+            from bot.screener import US_UNIVERSE
+            summary = await self.data_sync.sync_all(overseas_symbols=US_UNIVERSE)
+            logger.info(
+                f"데이터 업데이트 완료 — 국내={summary['domestic']} "
+                f"해외={summary['overseas']} 코인={summary['upbit']} "
+                f"({summary['elapsed_sec']}초)"
+            )
+        except Exception as e:
+            logger.error(f"데이터 업데이트 실패: {e}")
+
+        # 스크리닝 (데이터 업데이트 직후 실행)
+        await asyncio.gather(
+            self.run_screen_upbit(),
+            self.run_screen_kis_domestic(),
+            self.run_screen_kis_overseas(),
+        )
+
     # ── 스크리닝 실행 ─────────────────────────────────────────────
     async def run_screen_upbit(self):
         """00:30 KST: 업비트 코인 스크리닝"""
@@ -641,19 +666,14 @@ class AutoTradeBot:
         self.scheduler.add_kis_overseas_job(self.run_kis_overseas_strategies, interval_seconds=60)
         self.scheduler.add_daily_report_job(self.send_daily_report)
         self.scheduler.add_daily_reset_job(self.portfolio.reset_daily_pnl)
-        self.scheduler.add_screening_jobs(
-            screen_upbit=self.run_screen_upbit,
-            screen_kr=self.run_screen_kis_domestic,
-            screen_us=self.run_screen_kis_overseas,
-        )
+        # 12:30 KST: 데이터 업데이트 + 스크리닝 통합 잡
+        self.scheduler.add_data_sync_job(self.run_data_and_screen)
         self.scheduler.start()
 
         cfg_upbit = self.cfg.strategy.get("upbit", {})
         if not cfg_upbit.get("symbols"):
-            logger.info("초기 스크리닝 실행 중... (백그라운드)")
-            asyncio.ensure_future(self.run_screen_upbit())
-            asyncio.ensure_future(self.run_screen_kis_domestic())
-            asyncio.ensure_future(self.run_screen_kis_overseas())
+            logger.info("초기 데이터 업데이트+스크리닝 실행 중... (백그라운드)")
+            asyncio.ensure_future(self.run_data_and_screen())
 
         try:
             asyncio.ensure_future(self.notifier.start_command_listener())

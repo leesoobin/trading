@@ -1,79 +1,37 @@
-# 🤖 AutoTrade Bot
+# AutoTrade Bot
 
 > 업비트(코인) + 한국투자증권(국내/해외 주식) 자동매매봇
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
 ---
 
-## 📌 개요
+## 개요
 
 | 항목 | 내용 |
 |------|------|
 | **거래소** | 업비트 (암호화폐) · 한국투자증권 (국내/해외 주식) |
-| **활성 전략** | 터틀 트레이딩 · 추세추종 MA크로스 (코인/국내/해외 공통) |
-| **종목 발굴** | 배치 스크리닝 (일봉 기술점수) → 60초마다 신호 체크 |
-| **리스크** | Kelly Criterion 포지션 사이징 · 서킷브레이커 |
+| **활성 전략** | 터틀 트레이딩(스윙) · 추세추종 MA크로스(스윙) |
+| **유니버스** | 코인 ~242개 · 국내 KOSPI+KOSDAQ ~2,600개 · 해외 NASDAQ 100종목 |
+| **데이터 업데이트** | 매일 12:30 KST (DataSync — 주말/야간 모두 동작) |
+| **리스크** | Kelly Criterion 포지션 사이징 · 일일 손실 서킷브레이커 |
 | **알림** | 텔레그램 봇 (매수/매도/일일 리포트/명령 수신) |
 | **대시보드** | FastAPI + Chart.js 웹 UI (`http://localhost:8080`) |
-| **운용 자본** | 업비트 100만원 + KIS 100만원 = 총 200만원 |
-| **언어** | Python 3.11+ |
+| **운용 자본** | 업비트 ~100만원 + KIS ~100만원 = 총 ~200만원 |
 
 ---
 
-## 🗂️ 프로젝트 구조
-
-```
-money/
-├── config.yaml                  # API 키 + 전략 설정 (gitignore — 절대 커밋 금지)
-├── main.py                      # 봇 진입점 (봇 + 대시보드 동시 실행)
-├── bot.lock                     # 중복 실행 방지 락 파일 (자동 생성/삭제)
-├── trades.db                    # 거래 이력 SQLite
-│
-├── bot/
-│   ├── config.py                # pyyaml 기반 설정 로더
-│   ├── exchange/
-│   │   ├── upbit.py             # Upbit REST 클라이언트 (분봉/일봉/잔고/주문)
-│   │   └── kis.py               # KIS OAuth2 + REST 클라이언트
-│   ├── strategy/
-│   │   ├── base.py              # Strategy ABC + Signal Enum
-│   │   ├── turtle.py            # 터틀: 도니안채널 + ATR 사이징 + 피라미딩 ✅ 활성
-│   │   ├── trend_following.py   # 추세추종: MA 크로스오버 + 신고가 돌파 ✅ 활성
-│   │   ├── bollinger_breakout.py# 볼린저밴드: 상단 브레이크아웃 ⏸ 비활성
-│   │   ├── mtf_structure.py     # MTF 구조 매핑 (HTF 추세 + LTF BOS/ChoCh) ⏸ 비활성
-│   │   └── ma_pullback.py       # 이평선 눌림목 ⏸ 비활성
-│   ├── screener.py              # 배치 스크리닝 엔진 (일봉 기술점수)
-│   ├── risk.py                  # Kelly Criterion + 손절/익절 계산
-│   ├── portfolio.py             # 포지션 상태 추적 (메모리)
-│   ├── notification.py          # 텔레그램 알림 + 명령어 수신
-│   ├── scheduler.py             # APScheduler + 장 운영시간 관리
-│   └── storage.py               # SQLite 거래 이력 저장/조회
-│
-├── dashboard/
-│   ├── app.py                   # FastAPI 서버 + WebSocket
-│   ├── static/js/dashboard.js   # Chart.js 실시간 업데이트 (소수점 가격 처리)
-│   └── templates/index.html     # 대시보드 HTML
-│
-├── backtest/
-│   └── backtester.py            # 백테스팅 엔진 + CLI
-└── logs/                        # 일별 로그 파일
-```
-
----
-
-## ⚡ 빠른 시작
+## 빠른 시작
 
 ```bash
 # 1. 가상환경 + 의존성
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 2. 설정
 cp config.example.yaml config.yaml
-# config.yaml에 API 키 입력
+# config.yaml에 API 키 입력 (절대 커밋 금지)
 
 # 3. 봇 실행 (백그라운드)
 bash start.sh
@@ -84,97 +42,259 @@ tail -f logs/bot_$(date +%Y%m%d)*.log
 ```
 
 > **start.sh**: 기존 프로세스 자동 종료 → `bot.lock` 정리 → 백그라운드 재시작
-> **중복 실행 방지**: `bot.lock` (fcntl.flock)으로 단일 인스턴스 보장
 
 ---
 
-## 🔄 동작 흐름
-
-### 1단계 — 배치 스크리닝 (하루 3회)
-
-| 시각 (KST) | 대상 | 유니버스 | 필터 데이터 | 결과 |
-|-----------|------|---------|-----------|------|
-| **00:30** (매일) | 업비트 코인 | 24h 거래대금 상위 40개 | 4H봉 100개 (~16일치) | 최대 30개 |
-| **06:00** (월~토) | 미국 NASDAQ | 고정 유니버스 100종목 | 일봉 200개 (~10개월치) | 상위 N개 |
-| **15:00** (월~금) | KOSPI + KOSDAQ | 거래량 순위 각 100개 (장중만 동작) | 일봉 60개 (~3개월치) | 상위 N개 |
-
-- 스크리닝 결과 없으면 `config.yaml`의 `symbols` 폴백 사용
-- `_tech_score >= 3` 통과 기준: EMA 정배열(+3) · 거래량 급증(+2) · 52주 고가 근접(+2) · 볼린저 수축(+2) · 눌림목(+1)
-
-### 2단계 — 장중 신호 체크 (60초마다)
-
-선별된 종목 대상으로 매 60초:
+## 전체 시스템 흐름
 
 ```
-① 데이터 수집 (종목당 봉 데이터)
+[12:30 KST 매일]
+  DataSync.sync_all()          ← OHLCV DB 증분 업데이트
+      ├─ 국내: fchart 일봉 (~2,600종목)
+      ├─ 해외: yfinance 배치 (100종목)
+      └─ 코인: pyupbit 일봉 (~242종목)
+      ↓
+  Screener 3개 동시 실행      ← DB에서 OHLCV 로드 → 기술점수 계산
 
-   [업비트]
-     4H봉  100개 (~16일치)   ← 사용 안 함 (MTF 비활성)
-     15분봉 200개 (~50시간치) ← 사용 안 함 (Bollinger 비활성)
-     일봉   400개 (~1.6년치)  ← turtle / trend_following 사용
-
-   [국내 주식]
-     일봉   300개 (~1.2년치)  ← turtle / trend_following 사용
-     60분봉(KOSPI) / 30분봉(KOSDAQ) 120개 ← MTF 비활성 시 미사용
-
-   [해외 주식]
-     일봉   300개 (~1.2년치)  ← turtle / trend_following 사용
-     15분봉 100개 (~25시간치) ← MTF 비활성 시 미사용
-
-② 현재가 업데이트
-
-③ 보유 포지션 → 손절(-3%) / 최대 보유 기간 초과 체크 → 조건 충족 시 즉시 매도
-
-④ 미보유 포지션 → 전략 신호 계산 → BUY 신호 + 포지션 여유 있으면 매수
+[60초마다, 장 운영시간]
+  전략 실행 루프
+      ├─ KIS/pyupbit API로 최신 봉 데이터 실시간 수집
+      ├─ 손절/익절/보유기간 초과 체크
+      └─ 전략 신호 계산 → 매수/매도 실행
 ```
-
-### 장 운영 시간
-
-| 시장 | 운영 시간 | 요일 |
-|------|----------|------|
-| 업비트 (코인) | 24/7 | 매일 |
-| KIS 국내 | 09:00 ~ 15:20 KST | 평일 |
-| KIS 해외 (미국) | 22:30 ~ 05:00 KST (서머타임) / 23:30 ~ 06:00 (겨울) | 평일 |
 
 ---
 
-## 📈 전략 상세
+## 데이터 수집 상세
 
-### 활성 전략 요약
+### A. OHLCV DB 업데이트 (DataSync — 매일 12:30 KST)
 
-| 전략 | 사용 봉 | 진입 | 청산 | 스타일 | 최대 보유 |
-|------|---------|------|------|--------|----------|
-| **TurtleStrategy** ✅ | **일봉** | 55일 도니안 상단 돌파 | 20일 최저가 이탈 / 2ATR 손절 | 장기 추세추종 | 없음 |
-| **TrendFollowingStrategy** ✅ | **일봉** | MA20/MA200 골든크로스 또는 52주 신고가+정배열 | MA20/MA200 데드크로스 | 중기 스윙 | 14일 |
+| 시장 | 종목 수 | 소스 | 타임프레임 | DB 저장량 | market 키 |
+|------|--------|------|-----------|----------|----------|
+| KOSPI | ~840개 | 네이버 fchart XML | 일봉 (1d) | 최초 300봉 (~14개월) / 이후 5봉 증분 | `KOSPI` |
+| KOSDAQ | ~1,817개 | 네이버 fchart XML | 일봉 (1d) | 최초 300봉 (~14개월) / 이후 5봉 증분 | `KOSDAQ` |
+| 해외 NASDAQ | 100종목 | yfinance 배치 | 일봉 (1d) | 2년치 (~500봉) | `overseas` |
+| 업비트 코인 | ~242개 | pyupbit | 일봉 (1d) | 최초 300봉 (~10개월) / 이후 5봉 증분 | `upbit` |
 
-> 비활성: BollingerBreakout ⏸ · MTFStructure ⏸ · MAPullback ⏸
+- **증분 업데이트 로직**: DB에 데이터가 있으면 최신 5봉만 fetch, 최초엔 300봉 전체 수집
+- **주말/야간 동작**: 네이버 fchart·yfinance·pyupbit 모두 24h/주말 정상 동작
+- **종목 목록**: 네이버 sise_market_sum 크롤링으로 KOSPI+KOSDAQ 전체 종목 자동 갱신
 
-### 터틀 (`turtle`) — System 2
+### B. 스크리닝 데이터 (DataSync 완료 후 즉시 실행)
+
+#### 업비트 코인 스크리닝
+
+| 단계 | 소스 | 내용 |
+|------|------|------|
+| 1단계 (유니버스) | Upbit API 실시간 | 24h 거래대금 상위 40개 선별 |
+| 2단계 (기술분석) | DB 일봉 300봉 | 기술점수 계산 |
+| 2단계 폴백 | pyupbit API | DB 없으면 일봉 300개 직접 수집 |
+| 선별 기준 | — | 기술점수 ≥ 3점 → 상위 30개 |
+
+#### 국내 주식 스크리닝 (KOSPI + KOSDAQ)
+
+| 단계 | 소스 | 내용 |
+|------|------|------|
+| 1단계 (유니버스) | DB symbol_info | KOSPI/KOSDAQ 전체 ~2,600종목 목록 |
+| 2단계 (기술분석) | DB 일봉 300봉 | 각 종목 기술점수 계산 |
+| 폴백 (DB 없을 때) | 네이버 거래량 순위 + fchart API | 거래량 상위 100+100개 → fchart 일봉 100봉 |
+| 선별 기준 | — | 기술점수 ≥ 3점 → 상위 30개 |
+
+> DB 보유 시: 2,600개 전체 유니버스 처리 (기술점수 필터만 적용)
+> DB 미보유 시: 거래량 상위 200개만 처리 (구버전 폴백)
+
+#### 해외 NASDAQ 스크리닝
+
+| 단계 | 소스 | 내용 |
+|------|------|------|
+| 1단계 (유니버스) | US_UNIVERSE 고정 목록 | 100종목 |
+| 2단계 (기술분석) | DB 일봉 300봉 | 각 종목 기술점수 계산 |
+| 폴백 (DB 없을 때) | yfinance 개별 | 1y 일봉 직접 수집 |
+| 선별 기준 | — | 기술점수 ≥ 3점 → 상위 100개 |
+
+#### 기술점수 (_tech_score) 기준
+
+| 항목 | 배점 | 조건 |
+|------|------|------|
+| EMA 정배열 (5>20>60) | +3점 | 상승 추세 |
+| EMA 역배열 (5<20<60) | +3점 | 하락 추세 |
+| 거래량 급증 | +2점 / +1점 | 20일 평균 대비 2배↑ / 1.5배↑ |
+| 52주 신고가 근접 | +2점 / +1점 | 52주 고가의 93%↑ / 85%↑ |
+| 볼린저밴드 수축 | +2점 / +1점 | 40일 평균 표준편차의 65%↓ / 80%↓ |
+| 20EMA 눌림목 | +1점 | 현재가 ↔ 20EMA 거리 1.5% 이내 |
+| **통과 기준** | **≥ 3점** | |
+
+### C. 장중 실시간 데이터 (전략 실행, 매 60초)
+
+전략 실행 시에는 항상 **외부 API로 최신 데이터 실시간 수집** (DB 미사용):
+
+#### 업비트
+
+```
+df_htf   = upbit.get_candles(symbol, "240", count=100)   # 4H봉 100개 (~16일)  [MTF용, 현재 미사용]
+df_ltf   = upbit.get_candles(symbol, "15",  count=200)   # 15분봉 200개 (~50h) [Bollinger용, 현재 미사용]
+df_daily = upbit.get_daily_candles(symbol, count=400)    # 일봉 400개 (~1.6년)  [turtle/trend 사용]
+```
+
+소스: `Upbit REST API (api.upbit.com)`
+
+#### 국내 주식 (KIS)
+
+```
+df_daily = kis.get_domestic_daily_chart(symbol, count=300)             # 일봉 300개 (~14개월)   [turtle/trend 사용]
+df_ltf   = kis.get_domestic_minute_chart(symbol, period=60, count=120) # 60분봉 120개 (KOSPI)  [MTF용, 현재 미사용]
+         = kis.get_domestic_minute_chart(symbol, period=30, count=120) # 30분봉 120개 (KOSDAQ) [MTF용, 현재 미사용]
+```
+
+소스: `KIS OpenAPI (FHKST03010100 일봉 / FHKST03010200 분봉)`
+
+> KIS 분봉 API: 1회 30개씩 반환 → 배치 반복 호출로 count 달성
+
+#### 해외 주식 (KIS)
+
+```
+df_daily = kis.get_overseas_daily_chart(symbol, market="NAS", count=300) # 일봉 300개 (~14개월)  [turtle/trend 사용]
+df_ltf   = kis.get_overseas_minute_chart(symbol, nmin=15, count=100)     # 15분봉 100개 (~25h) [MTF용, 현재 미사용]
+```
+
+소스: `KIS OpenAPI (HHDFS76240000 일봉 / HHDFS76200200 분봉)`
+
+> 해외 분봉 API: nmin=1/5/10/15만 지원
+
+---
+
+## SQLite DB 구조 (trades.db)
+
+### ohlcv 테이블 (OHLCV 캐시)
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| symbol | TEXT | 종목 코드 (예: `005930`, `NVDA`, `KRW-BTC`) |
+| market | TEXT | 시장 구분 (`KOSPI` / `KOSDAQ` / `overseas` / `upbit`) |
+| timeframe | TEXT | 봉 단위 (현재 `1d` 만 사용) |
+| ts | TEXT | 타임스탬프 (`YYYY-MM-DD`) |
+| open/high/low/close/volume | REAL | 가격 데이터 |
+
+저장 데이터량:
+
+| market | 종목 수 | 봉 수 | 기간 |
+|--------|--------|------|------|
+| KOSPI | ~840 | 최대 300봉 | ~14개월 |
+| KOSDAQ | ~1,817 | 최대 300봉 | ~14개월 |
+| overseas | ~100 | ~500봉 | ~2년 |
+| upbit | ~242 | 최대 300봉 | ~10개월 |
+
+### symbol_info 테이블 (종목 코드 ↔ 이름)
+
+| 컬럼 | 타입 | 예시 |
+|------|------|------|
+| symbol | TEXT | `005930` |
+| market | TEXT | `KOSPI` / `KOSDAQ` / `overseas` / `upbit` |
+| name | TEXT | `삼성전자` |
+
+> DataSync 실행 시 자동 갱신. 대시보드 종목 검색, 텔레그램 알림에 사용.
+
+### trades 테이블 (거래 이력)
+
+매수/매도 실행 시마다 기록. 포지션 복원, 손익 집계, 대시보드에 사용.
+
+### analysis_cache 테이블 (분석 캐시)
+
+대시보드 종목 분석 탭 캐시 (1시간 TTL).
+
+---
+
+## 전략 상세
+
+### 스타일 구분
+
+| 스타일 | 설명 | 활성 전략 |
+|--------|------|----------|
+| **스윙 (Swing)** | 일봉 기준, 수일~수주 보유 | TurtleStrategy ✅, TrendFollowingStrategy ✅ |
+| **데이트레이딩** | 15분/60분봉, 당일 청산 목표 | BollingerBreakout ⏸, MTFStructure ⏸ |
+
+> **현재는 스윙 전략만 활성.** 데이트레이딩 전략은 코드는 존재하나 config에서 비활성화.
+
+---
+
+### TurtleStrategy (스윙) ✅ 활성
+
+**Richard Dennis & William Eckhardt의 1983년 터틀 트레이딩 — System 2**
 
 | 항목 | 값 |
 |------|-----|
-| 진입 | 55일 최고가 돌파 (전일 기준) |
-| 청산 | 20일 최저가 이탈 |
-| ATR 손절 | 진입가 - 2ATR |
-| 피라미딩 | 0.5 ATR 상승마다 +1 Unit (최대 4 Unit) |
-| 필터 | System 1만 적용 (System 2는 필터 없음) |
+| **사용 봉** | 일봉 (업비트 400개 / 국내·해외 300개) |
+| **진입** | 55일 도니안채널 상단 돌파 (전일 종가 ≤ 55일 고가 < 당일 종가) |
+| **청산** | 20일 최저가 이탈 (전략 신호) |
+| **손절** | 진입가 - 2×ATR(14일) 또는 -3% 안전망 중 높은 쪽 |
+| **피라미딩** | 0.5 ATR 상승마다 +1 Unit (최대 4 Units) |
+| **최대 보유** | 제한 없음 (추세가 이어지는 한 유지) |
+| **TP(익절가)** | 없음 — 전략 신호로만 청산 |
+| **데이터 소스** | 장중: KIS API / Upbit API (실시간) |
 
 ```
-진입 조건: prev_close ≤ 55일고가 < curr_close
-청산 조건: curr_close < 20일저가 OR curr_close < entry - 2×ATR
+진입: prev_close ≤ high_55d < curr_close
+청산: curr_close < low_20d  OR  curr_close < entry - 2×ATR
 ```
-
-### 추세추종 (`trend_following`)
-
-| 신호 | 조건 |
-|------|------|
-| 매수 | MA20 > MA200 골든크로스 |
-| 매수 | MA20 > MA200 + 전일비 +1%↑ + 거래량 평균 150%↑ + 52주 신고가 |
-| 매도 | MA20 < MA200 데드크로스 |
 
 ---
 
-## 🛡️ 리스크 관리
+### TrendFollowingStrategy (스윙) ✅ 활성
+
+**MA 크로스오버 + 52주 신고가 돌파 복합 신호**
+
+| 항목 | 값 |
+|------|-----|
+| **사용 봉** | 일봉 (업비트 400개 / 국내·해외 300개) |
+| **진입 조건 A** | MA20 > MA200 골든크로스 (전일 MA20 ≤ MA200, 당일 MA20 > MA200) |
+| **진입 조건 B** | MA20 > MA200 + 전일비 +1%↑ + 거래량 20일 평균 150%↑ + 52주 신고가 |
+| **청산** | MA20 < MA200 데드크로스 (전략 신호) |
+| **손절** | -3% 안전망 |
+| **최대 보유** | 14일 (초과 시 강제 청산) |
+| **TP(익절가)** | 없음 — 전략 신호로만 청산 |
+| **데이터 소스** | 장중: KIS API / Upbit API (실시간) |
+
+```
+진입A: prev_ma20 <= prev_ma200 AND curr_ma20 > curr_ma200
+진입B: curr_ma20 > curr_ma200 AND pct_change >= 1% AND volume_ratio >= 1.5 AND curr >= high_52w
+청산:  prev_ma20 >= prev_ma200 AND curr_ma20 < curr_ma200
+```
+
+---
+
+### BollingerBreakoutStrategy (데이트레이딩) ⏸ 비활성
+
+| 항목 | 값 |
+|------|-----|
+| **사용 봉** | 15분봉 200개 (~50시간) |
+| **진입** | 볼린저밴드 상단 브레이크아웃 |
+| **청산** | 밴드 복귀 또는 TP +6% |
+| **최대 보유** | 3일 |
+| **비활성 이유** | 코인 실거래 손실 → 추가 검증 필요 |
+
+---
+
+### MTFStructureStrategy (데이트레이딩) ⏸ 비활성
+
+**다중 타임프레임 구조 매핑 (HTF 추세 + LTF 진입)**
+
+| 시장 | HTF (추세 파악) | LTF (진입 타점) |
+|------|----------------|----------------|
+| 코인 | 4H봉 100개 (~16일) | 15분봉 200개 (~50h) |
+| KOSPI | 일봉 300개 | 60분봉 120개 |
+| KOSDAQ | 일봉 300개 | 30분봉 120개 |
+| NASDAQ | 일봉 300개 | 15분봉 100개 |
+
+| 항목 | 값 |
+|------|-----|
+| **진입** | HTF 상승추세 + LTF 해머캔들 + 거래량 급증 |
+| **청산** | HTF 추세 전환 또는 TP |
+| **최대 보유** | 3일 |
+| **비활성 이유** | 거래 수 부족, 검증 미완 |
+
+---
+
+## 리스크 관리
 
 ### 포지션 사이징 (Kelly Criterion)
 
@@ -182,70 +302,98 @@ tail -f logs/bot_$(date +%Y%m%d)*.log
 f* = (b × p - q) / b
   b = 수익비 (익절6% ÷ 손절3% = 2.0)
   p = 승률 (0.55 가정)
+  q = 1 - p = 0.45
 
 Half-Kelly 적용 후 종목당 최대 6% 캡
-∴ 매수금액 = 총자산(200만원) × 6% ≈ 120,000원/종목
+매수금액 = 총자산(200만원) × 6% ≈ 12만원/종목
 ```
 
-### 손절/청산/최대 보유 기간
+### 손절/청산 규칙
 
-| 전략 | 손절 | 청산 조건 | 최대 보유 |
+| 전략 | 손절 | 청산 신호 | 최대 보유 |
 |------|------|----------|----------|
-| 터틀 | 2ATR 또는 -3% 안전망 | 20일 최저가 이탈 | **없음** |
-| 추세추종 | -3% | MA20 < MA200 데드크로스 | **14일** |
+| TurtleStrategy | 2ATR 또는 -3% 안전망 | 20일 최저가 이탈 | **없음** |
+| TrendFollowingStrategy | -3% | MA20 < MA200 데드크로스 | **14일** |
+| BollingerBreakout | -3% | 밴드 복귀 | 3일 |
+| MTFStructure | 전략 자체 SL | HTF 추세 전환 | 3일 |
 
-최대 보유 기간 초과 시 → 자동 강제 청산 + 텔레그램 알림
+### 청산 후 쿨다운
+
+- **모든 청산(손절/익절/전략신호) 후 24시간** 동일 종목 재진입 금지
+- 과매매 방지 및 연속 손실 차단
 
 ### 서킷브레이커
 
-- 일일 손실이 총자산의 **-2%** 도달 시 당일 신규 매수 중단
-- 텔레그램 즉시 알림
-- `/resume` 명령으로 재개
-
-### 포지션 수 제한
-
-- 동시 최대 보유 종목: **5** (`max_concurrent_positions`)
-- 동일 종목 중복 매수 없음 (포지션 연 전략만 청산 가능)
+- 일일 손실이 총자산의 **-2%** 도달 시 당일 신규 매수 전면 중단
+- `/resume` 텔레그램 명령으로 재개
 
 ---
 
-## 🔄 재시작 시 포지션 복원
+## 스케줄
 
-포트폴리오는 **메모리**에만 저장되므로, 봇 재시작 시 `trades.db`에서 미청산 포지션을 자동 복원합니다:
+| 시각 (KST) | 작업 | 대상 |
+|-----------|------|------|
+| **12:30** (매일) | DataSync + 스크리닝 통합 | 국내+해외+코인 동시 실행 |
+| **16:00** (매일) | 일일 리포트 | 텔레그램 전송 |
+| **00:00** (매일) | 일일 손익 리셋 | 포트폴리오 초기화 |
+| **매 60초** (장중) | 전략 실행 | 코인(24/7) · 국내(09:00-15:20) · 해외(22:30-05:00) |
 
-- DB에서 매수 후 매도 기록이 없는 종목 조회
-- 동일 종목 여러 건은 **평균가 + 합산 수량**으로 병합
-- 복원된 포지션의 손절가는 진입 평균가 기준으로 재계산
-
----
-
-## 📊 대시보드 (`http://localhost:8080`)
-
-| 섹션 | 내용 |
-|------|------|
-| 총 자산 | 업비트 KRW + 코인 평가액 + KIS 자본 합산 |
-| 오늘 손익 | 당일 청산 거래 기준 실현 손익 |
-| 현재 포지션 | 종목/거래소/전략/진입가/현재가/손절가/목표가/손익 |
-| 최근 거래 이력 | 최근 20건 |
-| 전략별 성과 | 전략별 거래수/승률/누적손익 |
-
-모든 가격은 소수점 완전 표시 (K/M 약자 없음 — 소액 코인 대응).
+> `misfire_grace_time=300`: 이벤트 루프 지연 5분 이내면 실행 보장
 
 ---
 
-## 📱 텔레그램 명령어
+## 프로젝트 구조
 
-| 명령어 | 설명 |
-|--------|------|
-| `/status` | 봇 상태 |
-| `/positions` | 현재 포지션 |
-| `/pnl` | 손익 현황 |
-| `/stop` | 봇 중지 |
-| `/resume` | 봇 재개 |
+```
+money/
+├── config.yaml              # API 키 + 전략 설정 (gitignore — 절대 커밋 금지)
+├── main.py                  # 봇 진입점 (봇 + 대시보드 동시 실행)
+├── trades.db                # 거래 이력 + OHLCV 캐시 SQLite
+├── start.sh                 # 봇 시작 스크립트 (백그라운드 실행)
+│
+├── bot/
+│   ├── data_sync.py         # DataSync — 전체 유니버스 OHLCV 증분 업데이트 엔진
+│   ├── screener.py          # 배치 스크리닝 엔진 (DB 우선 → API 폴백)
+│   ├── scheduler.py         # APScheduler + 12:30 통합 스케줄
+│   ├── storage.py           # SQLite CRUD (거래이력/OHLCV/종목정보/분석캐시)
+│   ├── risk.py              # Kelly Criterion + 손절/익절 계산
+│   ├── portfolio.py         # 포지션 상태 추적 (메모리)
+│   ├── notification.py      # 텔레그램 알림 + 명령어 수신
+│   ├── config.py            # pyyaml 설정 로더
+│   ├── indicators.py        # 보조지표 (ATR, 도니안채널 등)
+│   ├── exchange/
+│   │   ├── upbit.py         # Upbit REST 클라이언트
+│   │   └── kis.py           # KIS OAuth2 + REST 클라이언트
+│   └── strategy/
+│       ├── base.py          # Strategy ABC + Signal Enum
+│       ├── turtle.py        # 터틀 트레이딩 ✅ 활성
+│       ├── trend_following.py # 추세추종 MA크로스 ✅ 활성
+│       ├── bollinger_breakout.py # 볼린저밴드 ⏸ 비활성
+│       ├── mtf_structure.py # MTF 구조 매핑 ⏸ 비활성
+│       └── ma_pullback.py   # 이평선 눌림목 ⏸ 비활성
+│
+├── dashboard/
+│   ├── app.py               # FastAPI 서버 + WebSocket
+│   ├── static/js/dashboard.js # Chart.js 실시간 UI (소수점 완전 표시)
+│   └── templates/index.html
+│
+├── backtest/
+│   └── backtester.py        # 백테스팅 엔진 + CLI
+└── logs/                    # 일별 로그
+```
 
 ---
 
-## 📊 백테스트 결과 (2026-02-21)
+## 재시작 시 자동 복원
+
+| 항목 | 복원 소스 | 동작 |
+|------|----------|------|
+| 미청산 포지션 | `trades.db` | 매수 후 매도 없는 건 → 평균가+합산수량 병합 |
+| 스크리닝 결과 | `screened_*.json` | 이전 스크리닝 결과 파일에서 복원 |
+
+---
+
+## 백테스트 결과 (2026-02-21)
 
 > 초기자본 1,000만원 / 포지션 5% / 손절 3% / 익절 6%
 
@@ -253,10 +401,9 @@ Half-Kelly 적용 후 종목당 최대 6% 캡
 |------|-----|------|--------|------|
 | turtle | 일봉 | 55.3% | +348,965원 | ✅ 활성 |
 | trend_following | 일봉 | 56.2% | +330,841원 | ✅ 활성 |
-| bollinger_breakout | 15분봉 | 55.8% | +187,542원 | ⏸ 비활성 (코인 손실) |
-| ma_pullback | 일봉 | 33.3% | -519원 | ⏸ 비활성 (성과 불량) |
-| mtf_structure | 15분 LTF | 40.0% | -6,946원 | ⏸ 비활성 (검증 부족) |
-| ~~smc 계열 5종~~ | — | — | — | ❌ 제거 |
+| bollinger_breakout | 15분봉 | 55.8% | +187,542원 | ⏸ 비활성 |
+| ma_pullback | 일봉 | 33.3% | -519원 | ⏸ 비활성 |
+| mtf_structure | 15분 LTF | 40.0% | -6,946원 | ⏸ 비활성 |
 
 ```bash
 # 백테스트 실행
@@ -265,7 +412,7 @@ Half-Kelly 적용 후 종목당 최대 6% 캡
 
 ---
 
-## ⚙️ config.yaml 주요 설정
+## config.yaml 주요 설정
 
 ```yaml
 risk:
@@ -287,32 +434,55 @@ strategy:
 
 ---
 
-## ⚠️ 주의사항
+## 텔레그램 명령어
 
-- `config.yaml`은 `.gitignore` 포함 — **절대 커밋 금지**
+| 명령어 | 설명 |
+|--------|------|
+| `/status` | 봇 상태 확인 |
+| `/positions` | 현재 포지션 |
+| `/pnl` | 손익 현황 |
+| `/stop` | 봇 중지 |
+| `/resume` | 봇 재개 |
+
+---
+
+## KIS API 주의사항
+
+| 항목 | 내용 |
+|------|------|
+| OAuth2 토큰 | 1분당 1회 발급 제한 (EGW00133 오류 시 1분 대기) |
+| 국내 분봉 | `FHKST03010200` TR, 1회 30개씩 반환 |
+| 해외 분봉 | `HHDFS76200200` TR, nmin=1/5/10/15만 지원 |
+| 해외 일봉 | `HHDFS76240000` — 계좌 권한 문제로 404 반환 → yfinance로 대체 |
+| Rate limit | 해외 스크리닝 0.6초 대기, 장중 0.05초 대기 |
+
+---
+
+## 주의사항
+
+- `config.yaml`은 `.gitignore` — **절대 커밋 금지**
 - KIS는 최초 `is_paper_trading: true`로 검증 후 실전 전환
-- KIS OAuth2 토큰: **1분당 1회** 발급 제한 (EGW00133 오류 시 1분 대기)
-- KIS 국내 거래량 순위 API: **장중(09:00~15:20)에만 동작** → 스크리닝 15:00에 실행
-- 장외 시간에 봇 시작 시 국내 스크리닝은 자동 스킵 (15:00 정기 스케줄로 실행됨)
+- 봇은 **단일 인스턴스**만 실행 (`bot.lock`, fcntl.flock)
+- 포지션은 메모리 저장 → 재시작 시 DB 자동 복원
 - 미국 서머타임(3월~11월) 22:30 / 겨울(11월~3월) 23:30 시작
-- 봇은 **단일 인스턴스**로만 실행 (`bot.lock` 중복 방지)
-- 포지션은 메모리 저장 → 재시작 시 DB에서 자동 복원
 - 투자에는 항상 원금 손실 위험이 있습니다
 
 ---
 
-## 🚧 미구현 / 개선 예정
+## 미구현 / 개선 예정
 
 - [ ] 스크리닝 결과 대시보드 표시
 - [ ] KIS 잔고 API 연동 (현재 100만원 하드코딩)
-- [ ] 총자산 주기적 갱신 (현재 봇 시작 시 1회만 계산)
+- [ ] 총자산 주기적 갱신 (현재 봇 시작 시 1회)
 - [ ] bollinger_breakout / mtf_structure 재검증 후 재활성화 검토
-- [x] 최대 보유 기간 강제 청산 (추세추종 14일, 터틀 제외)
-- [x] misfire_grace_time 설정 (스크리닝 cron 잡 누락 방지)
-- [x] 국내 스크리닝 장외 시간 자동 스킵
+- [x] DataSync 전체 유니버스 OHLCV 증분 업데이트 엔진
+- [x] 스크리닝 DB 우선 로드 (API 재호출 최소화)
+- [x] 12:30 KST 통합 스케줄 (데이터+스크리닝)
+- [x] 최대 보유 기간 강제 청산
+- [x] 청산 후 24h 쿨다운 (재진입 방지)
 
 ---
 
-## 📄 라이선스
+## 라이선스
 
 MIT License
