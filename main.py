@@ -27,6 +27,14 @@ from bot.strategy.turtle import TurtleStrategy
 from bot.strategy.ma_pullback import MAPullbackStrategy
 from bot.strategy.mtf_structure import MTFStructureStrategy
 from bot.strategy.smc import SMCStrategy
+from bot.strategy.trend_template import TrendTemplateStrategy
+from bot.strategy.mansfield_rs import MansFieldRSStrategy
+from bot.strategy.supertrend import SuperTrendStrategy
+from bot.strategy.squeeze_momentum import SqueezeMomentumStrategy
+from bot.strategy.trendlines_break import TrendlinesBreakStrategy
+from bot.strategy.rsi_divergence import RSIDivergenceStrategy
+from bot.strategy.macd_strategy import MACDStrategy
+from bot.strategy.tether_line import TetherLineStrategy
 from bot.strategy.base import Signal
 from bot.risk import RiskManager
 from bot.portfolio import Portfolio, Position
@@ -50,21 +58,54 @@ logger = logging.getLogger(__name__)
 
 # 전략 맵 (활성/비활성 config에서 제어)
 STRATEGY_MAP = {
-    "turtle":            TurtleStrategy,
-    "trend_following":   TrendFollowingStrategy,
+    # ── 기존 전략 ──────────────────────────────────
+    "turtle":             TurtleStrategy,
+    "trend_following":    TrendFollowingStrategy,
     "bollinger_breakout": BollingerBreakoutStrategy,
-    "ma_pullback":       MAPullbackStrategy,
-    "mtf_structure":     MTFStructureStrategy,
-    "smc":               SMCStrategy,
+    "ma_pullback":        MAPullbackStrategy,
+    "mtf_structure":      MTFStructureStrategy,
+    "smc":                SMCStrategy,
+    # ── 신규 전략 (스윙/포지션, 일봉) ──────────────
+    "trend_template":     TrendTemplateStrategy,   # Minervini 8조건
+    "mansfield_rs":       MansFieldRSStrategy,     # Mansfield 상대강도
+    "supertrend":         SuperTrendStrategy,      # ATR SuperTrend (일봉)
+    "macd":               MACDStrategy,            # MACD 크로스 (일봉)
+    "tether_line":        TetherLineStrategy,      # Donchian 중심선 눌림목
+    "rsi_divergence":     RSIDivergenceStrategy,   # RSI 다이버전스
+    # ── 신규 전략 (데이트레이딩, 분봉) ─────────────
+    "squeeze_momentum":   SqueezeMomentumStrategy, # BB×KC 스퀴즈 (15분봉)
+    "trendlines_break":   TrendlinesBreakStrategy,  # 피봇 추세선 돌파 (15분봉)
+}
+
+# 일봉 전략: df_daily 사용 (스윙/포지션)
+DAILY_STRATEGIES = {
+    "TurtleStrategy", "TrendFollowingStrategy", "MAPullbackStrategy",
+    "TrendTemplateStrategy", "MansFieldRSStrategy", "SuperTrendStrategy",
+    "MACDStrategy", "TetherLineStrategy", "RSIDivergenceStrategy",
+}
+
+# 분봉 전략: df_ltf 사용 (데이트레이딩)
+LTF_STRATEGIES = {
+    "BollingerBreakoutStrategy", "SMCStrategy",
+    "SqueezeMomentumStrategy", "TrendlinesBreakStrategy",
 }
 
 # 전략별 최대 보유일 (초과 시 강제 청산)
 # TurtleStrategy: 제한 없음 (추세가 이어지는 한 유지)
 MAX_HOLD_DAYS: dict[str, int] = {
-    "BollingerBreakoutStrategy": 3,
-    "MTFStructureStrategy":      3,
+    "BollingerBreakoutStrategy":  3,
+    "MTFStructureStrategy":       3,
+    "SqueezeMomentumStrategy":    1,   # 데이트레이딩
+    "TrendlinesBreakStrategy":    1,   # 데이트레이딩
+    "SMCStrategy":                3,
     "TrendFollowingStrategy":    14,
     "MAPullbackStrategy":        14,
+    "SuperTrendStrategy":        14,
+    "TetherLineStrategy":        10,
+    "MACDStrategy":              14,
+    "RSIDivergenceStrategy":      7,
+    "TrendTemplateStrategy":     30,
+    "MansFieldRSStrategy":       30,
 }
 
 
@@ -188,7 +229,7 @@ class AutoTradeBot:
                 # 전략별 라우팅
                 for strategy in strategies:
                     sname = strategy.name
-                    if sname in ("TurtleStrategy", "TrendFollowingStrategy", "MAPullbackStrategy"):
+                    if sname in DAILY_STRATEGIES:
                         if df_daily is None or len(df_daily) < 50:
                             continue
                         signal = strategy.analyze(df_daily, symbol)
@@ -196,8 +237,13 @@ class AutoTradeBot:
                         if df_htf is None or df_ltf is None:
                             continue
                         signal = strategy.analyze_mtf(df_ltf, df_htf, symbol)
-                    else:  # BollingerBreakoutStrategy
+                    elif sname in LTF_STRATEGIES:
+                        if df_ltf is None or len(df_ltf) < 30:
+                            continue
                         signal = strategy.analyze(df_ltf, symbol)
+                    else:
+                        df_target = df_ltf if df_ltf is not None else df_daily
+                        signal = strategy.analyze(df_target, symbol)
 
                     reason = strategy.get_reason()
 
@@ -277,7 +323,7 @@ class AutoTradeBot:
 
                 for strategy in strategies:
                     sname = strategy.name
-                    if sname in ("TurtleStrategy", "TrendFollowingStrategy", "MAPullbackStrategy"):
+                    if sname in DAILY_STRATEGIES:
                         if len(df_daily) < 50:
                             continue
                         signal = strategy.analyze(df_daily, symbol)
@@ -285,6 +331,10 @@ class AutoTradeBot:
                         if df_ltf is None or len(df_daily) < 30:
                             continue
                         signal = strategy.analyze_mtf(df_ltf, df_daily, symbol)
+                    elif sname in LTF_STRATEGIES:
+                        if df_ltf is None or len(df_ltf) < 30:
+                            continue
+                        signal = strategy.analyze(df_ltf, symbol)
                     else:
                         df_target = df_ltf if df_ltf is not None else df_daily
                         signal = strategy.analyze(df_target, symbol)
@@ -366,7 +416,7 @@ class AutoTradeBot:
 
                 for strategy in strategies:
                     sname = strategy.name
-                    if sname in ("TurtleStrategy", "TrendFollowingStrategy", "MAPullbackStrategy"):
+                    if sname in DAILY_STRATEGIES:
                         if len(df_daily) < 50:
                             continue
                         signal = strategy.analyze(df_daily, symbol)
@@ -374,6 +424,10 @@ class AutoTradeBot:
                         if df_ltf is None or len(df_daily) < 30:
                             continue
                         signal = strategy.analyze_mtf(df_ltf, df_daily, symbol)
+                    elif sname in LTF_STRATEGIES:
+                        if df_ltf is None or len(df_ltf) < 30:
+                            continue
+                        signal = strategy.analyze(df_ltf, symbol)
                     else:
                         df_target = df_ltf if df_ltf is not None else df_daily
                         signal = strategy.analyze(df_target, symbol)

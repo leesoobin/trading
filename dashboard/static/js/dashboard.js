@@ -372,7 +372,14 @@ function renderChartInContainer(containerId, ohlcv, trades, signalMarkers, heigh
   }
 
   // 2) 실제 DB 거래 이력 마커 (더 크게)
-  const strategyLabel = { turtle: '터틀', trend_following: '추세추종' };
+  const strategyLabel = {
+    turtle: '터틀', trend_following: '추세추종', smc: 'SMC',
+    trend_template: 'TrendTemplate', mansfield_rs: 'MansRS',
+    supertrend: 'SuperTrend', macd: 'MACD', tether_line: 'Tether',
+    rsi_divergence: 'RSI괴리', squeeze_momentum: 'Squeeze',
+    trendlines_break: 'TrendBreak', bollinger_breakout: 'BB돌파',
+    mtf_structure: 'MTF', ma_pullback: 'MA눌림',
+  };
   for (const t of (trades || [])) {
     allMarkers.push({
       time: t.date,
@@ -465,7 +472,11 @@ function renderRecommendation(rec) {
 let _modalChart = null;
 
 // 전략별 차트 타임프레임: 스윙은 일봉, 데이트레이딩/MTF는 1시봉
-const SWING_STRATEGIES = new Set(['turtle', 'trend_following', 'smc', 'ma_pullback']);
+const SWING_STRATEGIES = new Set([
+  'turtle', 'trend_following', 'smc', 'ma_pullback',
+  'trend_template', 'mansfield_rs', 'supertrend', 'macd',
+  'tether_line', 'rsi_divergence',
+]);
 function _chartInterval(strategy) {
   return SWING_STRATEGIES.has(strategy) ? '1d' : '1h';
 }
