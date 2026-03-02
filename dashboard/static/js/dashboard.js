@@ -186,7 +186,7 @@ async function loadTrades() {
           <td>₩${fmt(t.price)}</td>
           <td>${t.quantity ? t.quantity.toFixed(4) : '-'}</td>
           <td class="${t.pnl >= 0 ? 'positive' : 'negative'}">${pnlStr}</td>
-          <td><button class="btn-chart" onclick="openTVModal('${t.symbol}','${t.exchange}')">📈</button></td>
+          <td><button class="btn-chart" onclick="openTVModal('${t.symbol}','${t.exchange}','${t.strategy}')">📈</button></td>
         </tr>
       `;
     }).join('');
@@ -464,26 +464,37 @@ function renderRecommendation(rec) {
 // ── 거래 차트 모달 ────────────────────────────────────────────────
 let _modalChart = null;
 
-async function openTVModal(symbol, exchange) {
+// 전략별 차트 타임프레임: 스윙은 일봉, 데이트레이딩/MTF는 1시봉
+const SWING_STRATEGIES = new Set(['turtle', 'trend_following', 'smc', 'ma_pullback']);
+function _chartInterval(strategy) {
+  return SWING_STRATEGIES.has(strategy) ? '1d' : '1h';
+}
+function _chartLabel(strategy) {
+  return SWING_STRATEGIES.has(strategy) ? '일봉' : '1시봉';
+}
+
+async function openTVModal(symbol, exchange, strategy) {
   const market = exchange === 'upbit' ? 'coin'
                : exchange === 'kis_domestic' ? 'domestic'
                : 'overseas';
+  const interval = _chartInterval(strategy || 'turtle');
+  const ivLabel = _chartLabel(strategy || 'turtle');
 
   document.getElementById('tv-modal').style.display = 'flex';
-  document.getElementById('modal-chart-title').textContent = `${symbol} 로딩 중...`;
+  document.getElementById('modal-chart-title').textContent = `${symbol} 로딩 중... (${ivLabel})`;
   document.getElementById('modal-chart-legend').innerHTML = '';
   document.getElementById('modal-candle-container').innerHTML = '';
   if (_modalChart) { try { _modalChart.remove(); } catch (_) {} _modalChart = null; }
 
   try {
-    const data = await fetch(`/api/analyze?symbol=${encodeURIComponent(symbol)}&market=${market}&interval=1d`).then(r => r.json());
+    const data = await fetch(`/api/analyze?symbol=${encodeURIComponent(symbol)}&market=${market}&interval=${interval}`).then(r => r.json());
     if (data.error) {
       document.getElementById('modal-chart-title').textContent = `${symbol} — 오류: ${data.error}`;
       return;
     }
 
     document.getElementById('modal-chart-title').textContent =
-      `${symbol}  |  현재가 ${fmt(data.current_price)}  |  기술점수 ${(data.tech_score || 0).toFixed(1)}/10`;
+      `${symbol}  [${ivLabel}]  |  현재가 ${fmt(data.current_price)}  |  기술점수 ${(data.tech_score || 0).toFixed(1)}/10`;
 
     document.getElementById('modal-chart-legend').innerHTML = `
       <span style="color:#22c55e">▲ 터틀매수</span>

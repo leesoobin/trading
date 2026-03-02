@@ -26,6 +26,7 @@ from bot.strategy.bollinger_breakout import BollingerBreakoutStrategy
 from bot.strategy.turtle import TurtleStrategy
 from bot.strategy.ma_pullback import MAPullbackStrategy
 from bot.strategy.mtf_structure import MTFStructureStrategy
+from bot.strategy.smc import SMCStrategy
 from bot.strategy.base import Signal
 from bot.risk import RiskManager
 from bot.portfolio import Portfolio, Position
@@ -47,14 +48,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 검증된 전략 + MTF 신규 전략 (불량 전략 제거)
-# 제거: smc, smc_ob_pullback, smc_liquidity_sweep, smc_range, smc_golden_ob, rsi_reversal
+# 전략 맵 (활성/비활성 config에서 제어)
 STRATEGY_MAP = {
     "turtle":            TurtleStrategy,
     "trend_following":   TrendFollowingStrategy,
     "bollinger_breakout": BollingerBreakoutStrategy,
     "ma_pullback":       MAPullbackStrategy,
     "mtf_structure":     MTFStructureStrategy,
+    "smc":               SMCStrategy,
 }
 
 # 전략별 최대 보유일 (초과 시 강제 청산)
