@@ -565,10 +565,7 @@ class AutoTradeBot:
     async def run_data_and_screen(self):
         """12:30 KST: 전체 데이터 업데이트 후 스크리닝 실행"""
         try:
-            cfg_ovs = self.cfg.strategy.get("kis_overseas", {})
-            market = cfg_ovs.get("market", "NAS")
-            from bot.screener import US_UNIVERSE
-            summary = await self.data_sync.sync_all(overseas_symbols=US_UNIVERSE)
+            summary = await self.data_sync.sync_all()
             logger.info(
                 f"데이터 업데이트 완료 — 국내={summary['domestic']} "
                 f"해외={summary['overseas']} 코인={summary['upbit']} "

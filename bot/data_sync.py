@@ -131,12 +131,43 @@ class DataSync:
             logger.debug(f"[DataSync] fchart 일봉 오류 {code}: {e}")
             return None
 
+    # ── NASDAQ 전체 종목 목록 ──────────────────────────────────────
+
+    def fetch_nasdaq_universe(self) -> list[tuple[str, str, str]]:
+        """NASDAQ API로 전체 상장 종목 목록 수집
+
+        Returns: [(symbol, "overseas", name), ...]
+        ~4,000개 반환
+        """
+        try:
+            resp = requests.get(
+                "https://api.nasdaq.com/api/screener/stocks",
+                params={"tableonly": "true", "exchange": "NASDAQ", "download": "true"},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                },
+                timeout=20,
+            )
+            resp.raise_for_status()
+            rows = resp.json().get("data", {}).get("rows", [])
+            result = [
+                (r["symbol"], "overseas", r.get("name", r["symbol"]))
+                for r in rows
+                if r.get("symbol") and r["symbol"].isalpha()  # 특수문자 심볼 제외 (워런트/유닛 등)
+            ]
+            logger.info(f"[DataSync] NASDAQ 전체 유니버스: {len(result)}개 수집")
+            return result
+        except Exception as e:
+            logger.error(f"[DataSync] NASDAQ 유니버스 수집 실패: {e}")
+            return []
+
     # ── yfinance 해외 배치 ─────────────────────────────────────────
 
     def fetch_yfinance_batch(
         self, symbols: list[str], period: str = "2y"
     ) -> dict[str, pd.DataFrame]:
-        """yfinance 배치 다운로드 일봉 (주말/야간 동작)
+        """yfinance 단일 배치 다운로드 (symbols는 500개 이하 권장)
 
         Returns: {symbol: DataFrame(open/high/low/close/volume)}
         """
@@ -226,28 +257,55 @@ class DataSync:
 
     # ── 해외 동기화 ────────────────────────────────────────────────
 
-    async def sync_overseas(self, symbols: list[str]) -> int:
-        """해외 종목 전체 일봉 업데이트 (yfinance 배치)
+    async def sync_overseas(self) -> int:
+        """NASDAQ 전체 종목 일봉 업데이트
 
-        yfinance는 배치 다운로드가 효율적이므로 한 번에 처리
+        1. NASDAQ API로 전체 유니버스 수집 (~4,000개)
+        2. symbol_info DB 저장
+        3. 스마트 period 감지:
+           - DB에 데이터 없음(최초): period="2y" (~500봉)
+           - DB에 데이터 있음(증분): period="5d" (최근 5봉만)
+        4. 500개씩 배치로 yfinance 다운로드
         """
-        logger.info(f"[DataSync] 해외 일봉 업데이트 시작 ({len(symbols)}개)")
+        # 1. NASDAQ 전체 유니버스
+        universe = await asyncio.to_thread(self.fetch_nasdaq_universe)
+        if not universe:
+            logger.warning("[DataSync] NASDAQ 유니버스 수집 실패 — 업데이트 건너뜀")
+            return 0
 
-        result = await asyncio.to_thread(self.fetch_yfinance_batch, symbols, "2y")
+        symbols = [sym for sym, _, _ in universe]
 
+        # symbol_info 저장 (종목명 포함)
+        await asyncio.to_thread(self.storage.bulk_upsert_symbol_info, universe)
+        logger.info(f"[DataSync] 해외 symbol_info {len(universe)}개 저장 완료")
+
+        # 2. 스마트 period: DB에 NVDA 기준으로 초기/증분 구분
+        has_data = self.storage.get_ohlcv_latest_ts("NVDA", "overseas", "1d")
+        period = "5d" if has_data else "2y"
+        logger.info(
+            f"[DataSync] 해외 일봉 업데이트 시작: {len(symbols)}개, "
+            f"period={period} ({'증분' if has_data else '최초 전체'})"
+        )
+
+        # 3. 500개씩 배치
+        batch_size = 500
+        batches = [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
         ok = 0
-        for sym, df in result.items():
-            try:
-                if df is not None and len(df) > 0:
-                    await asyncio.to_thread(
-                        self.storage.upsert_ohlcv, sym, "overseas", "1d", df
-                    )
-                    await asyncio.to_thread(
-                        self.storage.upsert_symbol_info, sym, "overseas", sym
-                    )
-                    ok += 1
-            except Exception as e:
-                logger.debug(f"[DataSync] 해외 {sym} 저장 오류: {e}")
+        for idx, batch in enumerate(batches, 1):
+            logger.info(f"[DataSync] 해외 배치 {idx}/{len(batches)} ({len(batch)}개)")
+            result = await asyncio.to_thread(self.fetch_yfinance_batch, batch, period)
+            for sym, df in result.items():
+                try:
+                    if df is not None and len(df) > 0:
+                        await asyncio.to_thread(
+                            self.storage.upsert_ohlcv, sym, "overseas", "1d", df
+                        )
+                        ok += 1
+                except Exception as e:
+                    logger.debug(f"[DataSync] 해외 {sym} 저장 오류: {e}")
+            # 배치 간 짧은 대기 (yfinance rate limit 방지)
+            if idx < len(batches):
+                await asyncio.sleep(2)
 
         logger.info(f"[DataSync] 해외 완료: {ok}/{len(symbols)}개 업데이트")
         return ok
@@ -290,20 +348,17 @@ class DataSync:
 
     # ── 전체 동기화 ────────────────────────────────────────────────
 
-    async def sync_all(self, overseas_symbols: list[str] = None) -> dict:
+    async def sync_all(self) -> dict:
         """전체 데이터 업데이트 (국내 + 해외 + 코인 동시 실행)
 
         Returns: {domestic: int, overseas: int, upbit: int, elapsed_sec: float}
         """
-        from bot.screener import US_UNIVERSE
-
-        overseas = overseas_symbols or US_UNIVERSE
         logger.info("[DataSync] 전체 데이터 업데이트 시작")
         t0 = asyncio.get_event_loop().time()
 
         results = await asyncio.gather(
             self.sync_domestic(),
-            self.sync_overseas(overseas),
+            self.sync_overseas(),
             self.sync_upbit(),
             return_exceptions=True,
         )

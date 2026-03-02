@@ -425,44 +425,69 @@ class Screener:
         """
         미국 주식 스크리닝
 
-        [DB 보유 시] DataSync가 미리 수집한 OHLCV 사용 (yfinance 재호출 없음)
-        [DB 미보유 시] yfinance 배치 다운로드 폴백
+        [DB 보유 시] DataSync가 수집한 NASDAQ 전체 유니버스 (~4,000개) 스크리닝
+        [DB 미보유 시] US_UNIVERSE 고정 100종목 → yfinance 폴백
         """
-        import yfinance as yf
-
         logger.info(f"[스크리너] 해외({market}) 스크리닝 시작")
         try:
-            results = []
+            # ── DB 우선: 전체 NASDAQ 유니버스 ─────────────────────
+            if self._storage:
+                overseas_list = await asyncio.to_thread(
+                    self._storage.get_all_symbols, "overseas"
+                )
+                if overseas_list:
+                    logger.info(f"[스크리너] 해외 DB 유니버스: {len(overseas_list)}개 종목 처리")
+                    results = []
+                    ok, skip = 0, 0
+                    for sym, _, name in overseas_list:
+                        try:
+                            df = await asyncio.to_thread(
+                                self._storage.get_ohlcv, sym, "overseas", "1d", 300
+                            )
+                            if df is None or len(df) < 20:
+                                skip += 1
+                                continue
+                            score, trend, reasons = self._tech_score(df)
+                            if score >= 3:
+                                results.append(ScreenResult(
+                                    symbol=sym, exchange="kis_overseas",
+                                    score=score, trend=trend,
+                                    market_type=market,
+                                    reasons=reasons,
+                                    name=name,
+                                ))
+                            ok += 1
+                        except Exception as e:
+                            logger.debug(f"[스크리너] 해외 DB {sym} 오류: {e}")
+                    logger.info(
+                        f"[스크리너] 해외 DB 완료: 처리={ok} 데이터부족={skip} 통과={len(results)}"
+                    )
+                    results.sort(key=lambda x: x.score, reverse=True)
+                    selected = results[:self.top_n_overseas]
+                    logger.info(f"[스크리너] 해외 완료: {len(selected)}개 선별")
+                    return selected
 
+            # ── 폴백: US_UNIVERSE 100종목 + yfinance 개별 다운로드 ──
+            logger.info("[스크리너] 해외 DB 없음 → US_UNIVERSE 폴백")
+            results = []
             for symbol in US_UNIVERSE:
                 try:
-                    df = None
-                    # 1) DB에서 일봉 로드
-                    if self._storage:
-                        df = await asyncio.to_thread(
-                            self._storage.get_ohlcv, symbol, "overseas", "1d", 300
-                        )
+                    def _single_dl(sym=symbol):
+                        import yfinance as _yf
+                        t = _yf.Ticker(sym)
+                        raw = t.history(period="1y", interval="1d", auto_adjust=True)
+                        if raw is None or len(raw) < 20:
+                            return None
+                        raw = raw.rename(columns={
+                            "Open": "open", "High": "high",
+                            "Low": "low", "Close": "close", "Volume": "volume",
+                        })
+                        return raw[["open", "high", "low", "close", "volume"]]
 
-                    # 2) DB 미보유 시 yfinance 폴백 (개별 다운로드)
-                    if df is None or len(df) < 20:
-                        def _single_dl(sym=symbol):
-                            import yfinance as _yf
-                            t = _yf.Ticker(sym)
-                            raw = t.history(period="1y", interval="1d", auto_adjust=True)
-                            if raw is None or len(raw) < 20:
-                                return None
-                            raw = raw.rename(columns={
-                                "Open": "open", "High": "high",
-                                "Low": "low", "Close": "close", "Volume": "volume",
-                            })
-                            return raw[["open", "high", "low", "close", "volume"]]
-
-                        df = await asyncio.to_thread(_single_dl)
-                        await asyncio.sleep(0.05)
-
+                    df = await asyncio.to_thread(_single_dl)
+                    await asyncio.sleep(0.05)
                     if df is None or len(df) < 20:
                         continue
-
                     score, trend, reasons = self._tech_score(df)
                     if score >= 3:
                         results.append(ScreenResult(
