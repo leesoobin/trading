@@ -279,12 +279,13 @@ class DataSync:
         await asyncio.to_thread(self.storage.bulk_upsert_symbol_info, universe)
         logger.info(f"[DataSync] 해외 symbol_info {len(universe)}개 저장 완료")
 
-        # 2. 스마트 period: DB에 NVDA 기준으로 초기/증분 구분
-        has_data = self.storage.get_ohlcv_latest_ts("NVDA", "overseas", "1d")
-        period = "5d" if has_data else "2y"
+        # 2. 스마트 period: NVDA 데이터가 200봉 이상이면 증분, 아니면 전체
+        nvda_df = self.storage.get_ohlcv("NVDA", "overseas", "1d", 1000)
+        has_sufficient_data = nvda_df is not None and len(nvda_df) >= 200
+        period = "5d" if has_sufficient_data else "2y"
         logger.info(
             f"[DataSync] 해외 일봉 업데이트 시작: {len(symbols)}개, "
-            f"period={period} ({'증분' if has_data else '최초 전체'})"
+            f"period={period} ({'증분' if has_sufficient_data else '최초 전체'})"
         )
 
         # 3. 500개씩 배치
